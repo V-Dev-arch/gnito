@@ -1,0 +1,19 @@
+<svg width="240" height="240" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+  <!-- Gnito mark: a stylized "G" formed by an orbit around a core, suggesting
+       AI intelligence orbiting a personal machine. Works at 24px+ as a monochrome mark. -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B7FF2"/>
+      <stop offset="1" stop-color="#5B4FE0"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring (orbit) -->
+  <circle cx="120" cy="120" r="96" fill="none" stroke="url(#g)" stroke-width="14"/>
+  <!-- Inner core -->
+  <circle cx="120" cy="120" r="46" fill="url(#g)"/>
+  <!-- Slash through core, suggesting "your rules" / personal ownership -->
+  <rect x="112" y="32" width="16" height="176" rx="8" fill="#1A1A18"/>
+  <rect x="112" y="32" width="16" height="80" rx="8" fill="#8B7FF2" opacity="0.9"/>
+  <!-- Small dot (spark of intelligence) -->
+  <circle cx="120" cy="42" r="10" fill="#8B7FF2"/>
+</svg>

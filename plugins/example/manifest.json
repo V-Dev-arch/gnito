@@ -1,0 +1,1 @@
+{"name": "gnito-example-hello", "version": "1.0.0", "description": "Example Gnito plugin. Reads a file from an approved folder and returns the first line.", "author": "Gnito contributors", "license": "MIT", "gnitoVersion": "0.1.0", "permissions": ["files:read"], "tools": ["example_read_first_line"]}

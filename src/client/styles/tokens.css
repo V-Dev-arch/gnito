@@ -1,0 +1,151 @@
+/* ============================================================
+   Gnito — Design tokens (dark + light themes).
+   Uses CSS variables so components reference tokens, never hex.
+   ============================================================ */
+
+/* Spacing (4px base). */
+:root {
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+
+  /* Radii. */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-full: 9999px;
+
+  /* Type scale (clamp for fluid). */
+  --text-xs: clamp(0.75rem, 0.7rem + 0.25vw, 0.875rem);
+  --text-sm: clamp(0.875rem, 0.8rem + 0.35vw, 1rem);
+  --text-base: clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+  --text-lg: clamp(1.125rem, 1rem + 0.75vw, 1.5rem);
+  --text-xl: clamp(1.5rem, 1.2rem + 1.25vw, 2.25rem);
+
+  /* Fonts. */
+  --font-body: 'Inter', 'SF Pro Text', system-ui, sans-serif;
+  --font-display: 'Inter', 'SF Pro Display', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+
+  /* Motion. */
+  --transition-interactive: 180ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Z-index layers. */
+  --z-dropdown: 10;
+  --z-sticky: 20;
+  --z-overlay: 30;
+  --z-modal: 40;
+  --z-toast: 50;
+
+  /* Content widths. */
+  --content-chat: 720px;
+  --content-wide: 1200px;
+}
+
+/* Light theme. */
+:root, [data-theme='light'] {
+  --color-bg: #F7F7F5;
+  --color-surface: #FFFFFF;
+  --color-surface-2: #FAFAF9;
+  --color-surface-offset: #F1F1EF;
+  --color-border: #E4E4E0;
+  --color-divider: #EDEDEA;
+  --color-text: #1A1A18;
+  --color-text-muted: #6B6B66;
+  --color-text-faint: #A0A09A;
+  --color-primary: #5B4FE0;
+  --color-primary-hover: #4A40C8;
+  --color-primary-active: #3A32A8;
+  --color-primary-highlight: #E8E5FA;
+  --color-success: #1E7A46;
+  --color-success-highlight: #DCF2E5;
+  --color-warning: #B26504;
+  --color-warning-highlight: #FBEAD0;
+  --color-error: #C02626;
+  --color-error-highlight: #FBE3E3;
+  --color-neutral-hover: #EFEFEA;
+}
+
+/* Dark theme (default). */
+[data-theme='dark'] {
+  --color-bg: #16161A;
+  --color-surface: #1C1C22;
+  --color-surface-2: #212128;
+  --color-surface-offset: #26262E;
+  --color-border: #35353E;
+  --color-divider: #2C2C34;
+  --color-text: #F0F0ED;
+  --color-text-muted: #A3A39A;
+  --color-text-faint: #6B6B65;
+  --color-primary: #8B7FF2;
+  --color-primary-hover: #A095F5;
+  --color-primary-active: #C0B8F8;
+  --color-primary-highlight: #2E2A4A;
+  --color-success: #3FA670;
+  --color-success-highlight: #1F2A24;
+  --color-warning: #E5A34D;
+  --color-warning-highlight: #32261C;
+  --color-error: #F06666;
+  --color-error-highlight: #3A2020;
+  --color-neutral-hover: #2A2A32;
+}
+
+/* System preference (when no explicit theme set). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --color-bg: #F7F7F5;
+    --color-surface: #FFFFFF;
+    --color-surface-2: #FAFAF9;
+    --color-surface-offset: #F1F1EF;
+    --color-border: #E4E4E0;
+    --color-divider: #EDEDEA;
+    --color-text: #1A1A18;
+    --color-text-muted: #6B6B66;
+    --color-text-faint: #A0A09A;
+    --color-primary: #5B4FE0;
+    --color-primary-hover: #4A40C8;
+    --color-primary-active: #3A32A8;
+    --color-primary-highlight: #E8E5FA;
+    --color-success: #1E7A46;
+    --color-success-highlight: #DCF2E5;
+    --color-warning: #B26504;
+    --color-warning-highlight: #FBEAD0;
+    --color-error: #C02626;
+    --color-error-highlight: #FBE3E3;
+    --color-neutral-hover: #EFEFEA;
+  }
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-bg: #16161A;
+    --color-surface: #1C1C22;
+    --color-surface-2: #212128;
+    --color-surface-offset: #26262E;
+    --color-border: #35353E;
+    --color-divider: #2C2C34;
+    --color-text: #F0F0ED;
+    --color-text-muted: #A3A39A;
+    --color-text-faint: #6B6B65;
+    --color-primary: #8B7FF2;
+    --color-primary-hover: #A095F5;
+    --color-primary-active: #C0B8F8;
+    --color-primary-highlight: #2E2A4A;
+    --color-success: #3FA670;
+    --color-success-highlight: #1F2A24;
+    --color-warning: #E5A34D;
+    --color-warning-highlight: #32261C;
+    --color-error: #F06666;
+    --color-error-highlight: #3A2020;
+    --color-neutral-hover: #2A2A32;
+  }
+}

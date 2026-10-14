@@ -1,0 +1,1 @@
+{"compilerOptions": {"target": "ES2022", "module": "ESNext", "moduleResolution": "bundler", "strict": true, "esModuleInterop": true, "skipLibCheck": true, "resolveJsonModule": true, "isolatedModules": true, "forceConsistentCasingInFileNames": true, "allowImportingTsExtensions": true, "noEmit": true}, "include": ["src/server/**/*", "src/shared/**/*"]}

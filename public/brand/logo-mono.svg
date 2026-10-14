@@ -1,0 +1,6 @@
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+  <!-- Gnito sidebar mark (monochrome, currentColor). -->
+  <circle cx="24" cy="24" r="18" fill="none" stroke="currentColor" stroke-width="3.5"/>
+  <circle cx="24" cy="24" r="8" fill="currentColor"/>
+  <rect x="21.5" y="5" width="5" height="38" rx="2.5" fill="currentColor"/>
+</svg>

@@ -1,0 +1,12 @@
+<svg width="320" height="80" viewBox="0 0 320 80" xmlns="http://www.w3.org/2000/svg">
+  <!-- Gnito wordmark. -->
+  <style>
+    .g { font-family: 'Inter', system-ui, sans-serif; font-weight: 800; font-size: 42px; letter-spacing: -1.5px; }
+  </style>
+  <!-- Mark -->
+  <circle cx="40" cy="40" r="22" fill="none" stroke="#8B7FF2" stroke-width="5"/>
+  <circle cx="40" cy="40" r="9" fill="#8B7FF2"/>
+  <rect x="37" y="14" width="6" height="52" rx="3" fill="#8B7FF2"/>
+  <!-- Wordmark -->
+  <text x="82" y="54" class="g" fill="currentColor">Gnito</text>
+</svg>
