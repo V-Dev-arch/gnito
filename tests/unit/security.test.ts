@@ -3,7 +3,44 @@
  */
 import { describe, it, expect } from 'vitest';
 import { redactSecrets, truncateForLog } from '../../src/server/security/redact.js';
-import path from 'node:path';
+import { isTrustedOrigin } from '../../src/server/security/auth.js';
+import type { Request } from 'express';
+
+function requestWithOrigin(host: string, origin?: string): Request {
+  return {
+    header(name: string) {
+      if (name.toLowerCase() === 'host') return host;
+      if (name.toLowerCase() === 'origin') return origin;
+      return undefined;
+    },
+  } as unknown as Request;
+}
+
+describe('isTrustedOrigin', () => {
+  it('trusts loopback hosts by default', () => {
+    expect(isTrustedOrigin(requestWithOrigin('127.0.0.1:8377'))).toBe(true);
+  });
+
+  it('allows separate localhost ports for the development frontend and API', () => {
+    expect(isTrustedOrigin(requestWithOrigin('127.0.0.1:8377', 'http://localhost:5173'))).toBe(true);
+  });
+
+  it('rejects untrusted hosts and cross-site origins', () => {
+    expect(isTrustedOrigin(requestWithOrigin('attacker.example'))).toBe(false);
+    expect(isTrustedOrigin(requestWithOrigin('localhost:8377', 'https://attacker.example'))).toBe(false);
+  });
+
+  it('allows an explicitly configured exact network origin only when Host matches', () => {
+    const trusted = ['https://gnito.example.com'];
+    expect(isTrustedOrigin(requestWithOrigin('gnito.example.com', 'https://gnito.example.com'), trusted)).toBe(true);
+    expect(isTrustedOrigin(requestWithOrigin('other.example.com', 'https://gnito.example.com'), trusted)).toBe(false);
+    expect(isTrustedOrigin(requestWithOrigin('gnito.example.com', 'http://gnito.example.com'), trusted)).toBe(false);
+  });
+
+  it('rejects malformed origins', () => {
+    expect(isTrustedOrigin(requestWithOrigin('localhost:8377', 'not a URL'))).toBe(false);
+  });
+});
 
 describe('redactSecrets', () => {
   it('redacts OpenAI-style keys', () => {

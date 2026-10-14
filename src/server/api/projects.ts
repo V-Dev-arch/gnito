@@ -55,4 +55,4 @@ export function registerProjectRoutes(app: any): void {
     const info = db.prepare('DELETE FROM projects WHERE id = ?').run(req.params.id);
     res.json({ ok: info.changes > 0 });
   });
-};
+}

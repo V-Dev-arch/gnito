@@ -3,6 +3,8 @@
  * Binds to loopback by default. See docs/security.md.
  */
 import express, { type Express, type Request, type Response } from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
 import { CONFIG, ensureDataDir } from '../config.js';
 import { getDb } from '../db/index.js';
 import { requireSession, createSession, revokeSession, rateLimit, isTrustedOrigin } from '../security/auth.js';
@@ -76,7 +78,7 @@ export function createApp(): Express {
     res.status(404).json({ error: 'not-found', message: 'Unknown endpoint.' });
   });
 
-  app.use((err: any, req: any, res: any, next: any) => {
+  app.use((err: any, req: any, res: any, _next: any) => {
     const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
     const message = redactSecrets(truncateForLog(err.message || 'Internal server error', 500));
     console.error(`[gnito] ${req.method} ${req.originalUrl} → ${status}: ${message}`);
@@ -91,8 +93,6 @@ export function createApp(): Express {
 
 /** Serve the built frontend (dist/client) + SPA fallback. */
 function serveStaticFrontend(app: Express): void {
-  const path = require('node:path') as typeof import('node:path');
-  const fs = require('node:fs') as typeof import('node:fs');
   const CLIENT_DIST = path.resolve(process.cwd(), 'dist/client');
   if (!fs.existsSync(CLIENT_DIST)) {
     console.warn('[gnito] WARNING: dist/client not found. Run `npm run build` first.');

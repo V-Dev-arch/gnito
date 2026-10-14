@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { MessageSquare, Folder, FileText, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert } from 'lucide-react';
-import { useToast } from '../lib/toast';
 
 interface Props {
   children: React.ReactNode;
@@ -25,8 +24,6 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
-  const { push } = useToast();
-
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth <= 768);
     check();

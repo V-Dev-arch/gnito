@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send, Square, ShieldAlert, EyeOff, LogOut } from 'lucide-react';
+import { Send, ShieldAlert, EyeOff, LogOut } from 'lucide-react';
 import { api } from '../../lib/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,7 +13,6 @@ export function IncognitoPage() {
   const [streaming, setStreaming] = useState(false);
   const [streamedText, setStreamedText] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const sessionIdRef = useRef<string | null>(null);

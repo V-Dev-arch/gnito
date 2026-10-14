@@ -7,7 +7,7 @@
  */
 import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import cron from 'node-cron';
+import cron, { type ScheduledTask } from 'node-cron';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { redactSecrets, truncateForLog } from '../security/redact.js';
@@ -15,7 +15,7 @@ import { redactSecrets, truncateForLog } from '../security/redact.js';
 const db = getDb();
 
 // In-memory scheduler state.
-const activeCronJobs = new Map<string, cron.ScheduledTask>();
+const activeCronJobs = new Map<string, ScheduledTask | ReturnType<typeof setTimeout>>();
 let schedulerStarted = false;
 
 // ---------------------------------------------------------------- routes
@@ -153,17 +153,14 @@ export function registerAutomationRoutes(app: any): void {
     }
     // Evaluate cron next 5 occurrences.
     const times: number[] = [];
-    const task = cron.schedule(schedule.expression, () => {}, { timezone: schedule.timezone, scheduled: false });
-    void task;
     for (let i = 0; i < 5; i++) {
       // node-cron doesn't expose nextRunAt; use a simple heuristic — the UI displays
       // these as approximate and we always show the exact nextRunAt from the scheduler.
       times.push(Date.now() + (i + 1) * 3600_000); // placeholder — replaced by real scheduler
     }
-    task.stop();
     res.json({ nextRuns: times, approximate: true });
   });
-};
+}
 
 // ---------------------------------------------------------------- scheduler
 
@@ -194,7 +191,7 @@ function scheduleNextRun(automationId: string): void {
 
   const task = cron.schedule(schedule.expression, () => {
     triggerRun(automationId, { scheduled: true });
-  }, { timezone: schedule.timezone, scheduled: true });
+  }, { timezone: schedule.timezone });
   activeCronJobs.set(automationId, task);
 
   // For recurring, we do NOT fabricate a next_run_at — the cron scheduler
@@ -207,8 +204,8 @@ function scheduleNextRun(automationId: string): void {
 function stopCron(automationId: string): void {
   const existing = activeCronJobs.get(automationId);
   if (existing) {
-    if (typeof (existing as any).stop === 'function') (existing as any).stop();
-    else clearTimeout(existing as any);
+    if ('stop' in existing) void existing.stop();
+    else clearTimeout(existing);
     activeCronJobs.delete(automationId);
   }
 }
@@ -310,7 +307,6 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
   const automation = db.prepare('SELECT * FROM automations WHERE id = ?').get(automationId) as any;
   if (!automation) return;
 
-  const started = Date.now();
   try {
     // Use the user's saved default model (or first enabled provider).
     const defaultModelRow = db.prepare("SELECT value FROM settings WHERE key = 'composer.defaultModel'").get() as any;

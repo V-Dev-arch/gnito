@@ -233,7 +233,7 @@ export type PluginPermission = z.infer<typeof PluginPermissionSchema>;
 /** Plugin manifest — read from the plugin's manifest.json. */
 export const PluginManifestSchema = z.object({
   name: z.string().min(1).max(100),
-  version: z.string().regex(/^\d+\.\d+\.\d+(-[A-Za-z0-9.\-]+)?$/, 'semver'),
+  version: z.string().regex(/^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/, 'semver'),
   description: z.string().max(2000),
   author: z.string().max(200),
   license: z.string().max(100),

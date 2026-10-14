@@ -6,7 +6,6 @@ import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
-import { redactSecrets } from '../security/redact.js';
 
 const db = getDb();
 
@@ -132,4 +131,4 @@ export function registerChatRoutes(app: any): void {
     `).all(esc, esc) as any[];
     res.json(rows);
   });
-};
+}

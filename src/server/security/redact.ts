@@ -6,15 +6,15 @@
  * and a "key=value" fallback. Never perfect — docs/security.md documents the limits.
  */
 const SECRET_PATTERNS: { re: RegExp; label: string }[] = [
-  { re: /\bsk-[A-Za-z0-9_\-]{20,}/g, label: 'sk-…' },
+  { re: /\bsk-[A-Za-z0-9_-]{20,}/g, label: 'sk-…' },
   { re: /\bghp_[A-Za-z0-9]{30,}/g, label: 'github-token' },
   { re: /\bgho_[A-Za-z0-9]{30,}/g, label: 'github-oauth' },
   { re: /\bghs_[A-Za-z0-9]{30,}/g, label: 'github-secret' },
   { re: /\bAKIA[A-Z0-9]{16,}/g, label: 'AKIA…' },
-  { re: /\bAIza[0-9A-Za-z_\-]{30,}/g, label: 'AIza…' },
-  { re: /\bxoxb-[0-9A-Za-z\-]{20,}/g, label: 'xoxb-…' },
-  { re: /\bBearer\s+[A-Za-z0-9._\-]{20,}/gi, label: 'Bearer …' },
-  { re: /\b(api[-_]?key|token|password|secret)["' ]*[:=]\s*["']?[A-Za-z0-9._\-]{8,}["']?/gi, label: 'secret=…' },
+  { re: /\bAIza[0-9A-Za-z_-]{30,}/g, label: 'AIza…' },
+  { re: /\bxoxb-[0-9A-Za-z-]{20,}/g, label: 'xoxb-…' },
+  { re: /\bBearer\s+[A-Za-z0-9._-]{20,}/gi, label: 'Bearer …' },
+  { re: /\b(api[-_]?key|token|password|secret)["' ]*[:=]\s*["']?[A-Za-z0-9._-]{8,}["']?/gi, label: 'secret=…' },
 ];
 
 /** Redact known secret formats from a string (logs, error messages, exports). */

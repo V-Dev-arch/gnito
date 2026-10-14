@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
+const apiPort = Number(process.env.GNITO_PORT || 8377);
+
 export default defineConfig({
   plugins: [react()],
   root: path.resolve(__dirname, 'src/client'),
@@ -16,7 +18,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8377',
+        target: `http://127.0.0.1:${apiPort}`,
         changeOrigin: false,
       },
     },

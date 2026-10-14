@@ -83,4 +83,4 @@ export function registerMemoryRoutes(app: any): void {
     db.prepare('DELETE FROM memory_entries').run();
     res.json({ ok: true });
   });
-};
+}

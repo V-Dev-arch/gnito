@@ -18,7 +18,6 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { PluginManifestSchema } from '../../shared/types.js';
 import { CONFIG } from '../config.js';
-import { redactSecrets } from '../security/redact.js';
 
 const db = getDb();
 const PLUGINS_DIR = path.join(CONFIG.dataDir, 'plugins');
@@ -127,4 +126,4 @@ export function registerPluginRoutes(app: any): void {
     const manifest = JSON.parse(row.manifest);
     res.json({ tools: manifest.tools || [] });
   });
-};
+}

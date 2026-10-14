@@ -70,4 +70,4 @@ export function registerIncognitoRoutes(app: any): void {
   app.get('/api/incognito/count', (_req: Request, res: Response) => {
     res.json({ activeSessions: SESSIONS.size });
   });
-};
+}
