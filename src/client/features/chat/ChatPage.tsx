@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Link, useLocation } from 'wouter';
-import { Send, Square, Copy, Trash2, Plus, RefreshCw, Paperclip, Mic, Sparkles, Search as SearchIcon } from 'lucide-react';
-import { api, setSession } from '../../lib/api';
+import { Send, Square, Copy, Plus, RefreshCw } from 'lucide-react';
+import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';

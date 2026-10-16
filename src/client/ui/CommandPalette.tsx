@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
-import { MessageSquare, Folder, Zap, Plug, Settings, FileText, Search, ArrowRight } from 'lucide-react';
+import { MessageSquare, Folder, Zap, Plug, Settings, FileText, ArrowRight } from 'lucide-react';
 
 type IconComponent = React.ComponentType<{ size?: number | string; className?: string; }>;
 
@@ -14,7 +14,7 @@ interface CommandItem {
 }
 
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [location, setLocation] = useLocation();
+  const [, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);

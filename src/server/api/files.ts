@@ -179,6 +179,6 @@ export function registerFileRoutes(app: any): void {
       res.status(500).json({ error: 'delete-failed', message: redactSecrets(e.message) });
     }
   });
-};
+}
 
 function rel(p: string): string { return p; } // placeholder to keep TS happy

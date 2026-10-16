@@ -16,12 +16,10 @@
 import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ProviderConfigSchema, ProviderTestResultSchema, ModelInfoSchema, ChatMessage } from '../../shared/types.js';
 import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
 import { redactSecrets } from '../security/redact.js';
-import { CONFIG } from '../config.js';
 
 const db = getDb();
 
@@ -181,7 +179,7 @@ export function registerProviderRoutes(app: any): void {
 
     try {
       abortController = new AbortController();
-      const url = buildChatUrl(row, body.model);
+      const url = buildChatUrl(row);
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...(row.kind === 'anthropic-compatible'
@@ -267,11 +265,11 @@ export function registerProviderRoutes(app: any): void {
       res.end();
     }
   });
-};
+}
 
 // ---------------------------------------------------------------- helpers
 
-function buildChatUrl(row: any, model: string): string {
+function buildChatUrl(row: any): string {
   const base = row.base_url.replace(/\/+$/, '');
   if (row.kind === 'anthropic-compatible') return `${base}/v1/messages`;
   return `${base}/chat/completions`; // OpenAI-compatible

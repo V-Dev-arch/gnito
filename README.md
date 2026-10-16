@@ -33,7 +33,7 @@ your own key).
 
 ## Install
 
-Requires Node.js 20+.
+Requires Node.js 20.19+.
 
 ```bash
 git clone <your-fork> gnito
@@ -69,6 +69,7 @@ Everything Gnito saves lives under `~/.gnito/` (configurable via
 ## Security
 
 - Binds to loopback (`127.0.0.1`) by default.
+- Network deployments require an exact `GNITO_TRUSTED_ORIGINS` allowlist; this is not user authentication.
 - Session-token + CSRF protection on all API routes.
 - Path traversal and symlink escape blocked at every file route.
 - Provider keys never logged or exposed to the client.

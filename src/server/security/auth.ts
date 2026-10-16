@@ -1,9 +1,9 @@
 /**
  * Gnito — security middleware.
  *
- * We validate Host/Origin against a canonical allowlist (loopback hostnames
- * only), not against each other — DNS-rebinding attacks present matching
- * hostile headers. The allowlist is the trust root.
+ * We validate Host/Origin against loopback hostnames by default, plus only
+ * explicitly configured exact origins for deliberate network deployments.
+ * DNS-rebinding protection depends on this allowlist being the trust root.
  */
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
@@ -62,15 +62,24 @@ export function consumeBootstrapNonce(n: string): boolean {
  * Validate Host (and Origin when present) against the canonical allowlist.
  * Returns true if the request is from a trusted origin.
  */
-export function isTrustedOrigin(req: Request): boolean {
+export function isTrustedOrigin(req: Request, configuredOrigins: readonly string[] = CONFIG.trustedOrigins): boolean {
   const host = (req.header('host') || '').toLowerCase();
-  if (!isLoopbackHost(host)) return false;
+  const trustedOrigins = new Set(configuredOrigins.map((value) => value.toLowerCase()));
+  const trustedHosts = new Set(configuredOrigins.map((value) => new URL(value).host.toLowerCase()));
+  const trustedHost = isLoopbackHost(host) || trustedHosts.has(host);
+  if (!trustedHost) return false;
+
   const origin = (req.header('origin') || '').toLowerCase();
-  if (!origin) return true; // no Origin header (e.g. curl)
-  // Extract origin hostname (strip scheme and port).
-  let originHost = origin;
-  try { originHost = new URL(origin).host.toLowerCase(); } catch { /* keep raw */ }
-  return isLoopbackHost(originHost) || originHost === host;
+  if (!origin) return true; // GETs and non-browser clients may omit Origin.
+
+  try {
+    const parsedOrigin = new URL(origin);
+    const originHost = parsedOrigin.host.toLowerCase();
+    if (isLoopbackHost(host) && isLoopbackHost(originHost)) return true;
+    return trustedOrigins.has(parsedOrigin.origin.toLowerCase()) && originHost === host;
+  } catch {
+    return false;
+  }
 }
 
 const rateBuckets = new Map<string, { count: number; reset: number }>();

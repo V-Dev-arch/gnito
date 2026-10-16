@@ -7,7 +7,6 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
-import path from 'node:path';
 import { CONFIG, ensureDataDir } from '../config.js';
 
 export type Db = Database.Database;

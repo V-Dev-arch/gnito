@@ -426,7 +426,7 @@ export function registerToolRoutes(app: any): void {
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
     res.json(row);
   });
-};
+}
 
 function redactObject(o: any): any {
   try { return JSON.parse(redactSecrets(JSON.stringify(o ?? null))); } catch { return o; }

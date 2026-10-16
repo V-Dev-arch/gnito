@@ -29,7 +29,7 @@ checks yourself.
 | Design system (dark + light) | Tokens in `tokens.css`, both themes; live browser screenshots (desktop + mobile) |
 | Logo / wordmark / favicon | Original SVG marks under `public/brand/` |
 | Command palette (Ctrl/Cmd+K) | Rendered; keyboard navigable; aria labels |
-| Tests | 16 passing (`vitest run`) |
+| Tests | 21 passing (`vitest run`) |
 | Production build | `npm run build` bundles client (Vite) + server (esbuild); verified `npm start` boots and serves |
 
 ## ⚠️ Partial / with disclosed limitations
@@ -63,7 +63,7 @@ checks yourself.
 
 ```bash
 npm run typecheck   # tsc for both client and server
-npm run test        # vitest (16 tests)
+ npm run test        # vitest (21 tests)
 npm run build       # Vite + esbuild
 npm start           # production server on 127.0.0.1:8377
 ```

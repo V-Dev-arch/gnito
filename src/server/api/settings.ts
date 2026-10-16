@@ -72,4 +72,4 @@ export function registerSettingsRoutes(app: any): void {
       // Never includes incognito chat data — that's in-memory only.
     });
   });
-};
+}

@@ -6,13 +6,30 @@
 |---|---|
 | Rogue webpage POSTs to your local Gnito | Session-token header (not a cookie) + Origin/Referer check |
 | Cross-site request forgery (CSRF) | Custom `X-Gnito-Session` header + `Origin` validation |
-| DNS rebinding | Origin must match host; loopback-only bind by default |
+| DNS rebinding | Origin must match host; loopback-only bind by default; network deployments require explicit trusted origins |
 | Path traversal (`../`) | Input normalization + lexical + realpath containment check against approved roots |
 | Symlink escape | `realpathSync` on both root and candidate before allow-listing |
 | Secrets leaking into logs | Pattern-based redaction (`sk-`, `ghp_`, `Bearer …`, `key=value`) |
 | Unauthenticated API access | All `/api/*` routes require a session token (except `/api/session`) |
 | Wrong/corrupt backup archive | AES-256-GCM auth-tag check fails with 400 `wrong-password` |
 | Local-network exposure | Binds `127.0.0.1` by default |
+
+## Deliberate network deployments
+
+Keep the defaults for local use. To deliberately serve Gnito on a network,
+set `GNITO_HOST` to the interface you intend to bind and set
+`GNITO_TRUSTED_ORIGINS` to the exact browser origin(s), including scheme and
+non-default port when applicable, for example:
+
+```bash
+GNITO_HOST=127.0.0.1 GNITO_TRUSTED_ORIGINS=https://gnito.example.com npm start
+```
+
+When using a reverse proxy, keep Gnito bound to loopback and terminate TLS at
+the proxy. Do not use wildcard origins or expose Gnito directly to an
+untrusted network. The origin allowlist is a CSRF/DNS-rebinding boundary, **not
+user authentication**; anyone who can reach an allowed origin may access the
+same Gnito instance. Add appropriate network access controls before sharing it.
 
 ## What Gnito does NOT protect against
 

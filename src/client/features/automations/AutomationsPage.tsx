@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Zap, Play, Pause, Copy, Trash2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Zap, Play, Pause, Trash2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
 

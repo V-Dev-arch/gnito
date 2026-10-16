@@ -20,7 +20,7 @@ process.env.GNITO_DATA_DIR = TEST_DIR;
 process.env.GNITO_MASTER_KEY = randomUUID().replace(/-/g, '').repeat(2).slice(0, 64);
 
 // Must import AFTER env vars are set.
-import { getDb, resetDbForTests } from '../../src/server/db/index.js';
+import { resetDbForTests } from '../../src/server/db/index.js';
 import { createApp } from '../../src/server/api/app.js';
 import { createSession } from '../../src/server/security/auth.js';
 import { setProviderSecret, getProviderSecret } from '../../src/server/security/vault.js';

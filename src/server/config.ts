@@ -9,6 +9,20 @@ import fs from 'node:fs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE || '/tmp';
 
+function loadTrustedOrigins(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+
+  return value.split(',').map((entry) => {
+    const raw = entry.trim();
+    const url = new URL(raw);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+      throw new Error(`Invalid GNITO_TRUSTED_ORIGINS entry: ${raw}`);
+    }
+    return url.origin.toLowerCase();
+  });
+}
+
 /** Where Gnito stores all user data (SQLite DB, files, logs, secrets vault). */
 export const DATA_DIR =
   process.env.GNITO_DATA_DIR || path.join(HOME, '.gnito');
@@ -17,6 +31,8 @@ export const CONFIG = {
   /** Bind address — 127.0.0.1 by default for security. */
   host: process.env.GNITO_HOST || '127.0.0.1',
   port: Number(process.env.GNITO_PORT || 8377),
+  /** Exact browser origins allowed when deliberately serving beyond loopback. */
+  trustedOrigins: loadTrustedOrigins(process.env.GNITO_TRUSTED_ORIGINS),
 
   dataDir: DATA_DIR,
   dbPath: path.join(DATA_DIR, 'gnito.db'),

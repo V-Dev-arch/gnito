@@ -2,7 +2,6 @@
  * Build the server for production. Uses esbuild to bundle src/server → dist/server.
  */
 import { build } from 'esbuild';
-import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Plug, Zap, Mic, Lock } from 'lucide-react';
+import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
 

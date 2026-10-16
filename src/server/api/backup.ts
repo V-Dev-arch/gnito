@@ -165,7 +165,7 @@ export function registerBackupRoutes(app: any): void {
 
       // Apply (insert with new IDs; skip existing by natural key unless overwrite).
       // Wrapped in a single transaction so a mid-restore failure rolls back cleanly.
-      let applied = { chats: 0, projects: 0, settings: 0, memory: 0, plugins: 0, automations: 0, secrets: 0 };
+      const applied = { chats: 0, projects: 0, settings: 0, memory: 0, plugins: 0, automations: 0, secrets: 0 };
       const projectIdRemap = new Map<string, string>();
 
       const restoreAll = db.transaction(() => {
@@ -267,4 +267,4 @@ export function registerBackupRoutes(app: any): void {
     await fs.rm(path.join(BACKUP_DIR, filename), { force: true });
     res.json({ ok: true });
   });
-};
+}

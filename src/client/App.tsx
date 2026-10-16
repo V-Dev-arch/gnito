@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Switch, Route, Router } from 'wouter';
 import { useHashLocation } from 'wouter/use-hash-location';
-import { ToastProvider, useToast } from './lib/toast';
+import { ToastProvider } from './lib/toast';
 import { api, setSession, hasSession } from './lib/api';
 import { AppShell } from './ui/AppShell';
 import { ChatPage } from './features/chat/ChatPage';
@@ -57,7 +57,6 @@ function AppInner() {
   const [ready, setReady] = useState(false);
   const [sessionErr, setSessionErr] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const { push } = useToast();
   const { theme, setTheme } = useTheme();
 
   // Bootstrap session.
