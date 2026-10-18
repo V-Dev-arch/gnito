@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock } from 'lucide-react';
+import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock, Search } from 'lucide-react';
 import { CUSTOM_PROVIDER_PRESET, MANUS_PROVIDER_NOTICE, PROVIDER_PRESETS, type ProviderPreset } from '../../../shared/providerPresets';
 import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
@@ -20,6 +20,7 @@ const SECTIONS = [
   { id: 'storage', label: 'Local Storage', icon: Database },
   { id: 'memory', label: 'Memory & Privacy', icon: Shield },
   { id: 'automations', label: 'Automations', icon: Zap },
+  { id: 'tools', label: 'Tools & Search', icon: Search },
   { id: 'audio', label: 'Audio & Mic', icon: Mic },
   { id: 'backup', label: 'Backup & Restore', icon: Download },
   { id: 'diagnostics', label: 'Diagnostics', icon: Lock },
@@ -29,6 +30,7 @@ export function SettingsPage() {
   const [section, setSection] = useState('general');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [searchBackendDraft, setSearchBackendDraft] = useState('');
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [presetId, setPresetId] = useState('openai');
   const [newProvider, setNewProvider] = useState({ label: PROVIDER_PRESETS[0].label, baseUrl: PROVIDER_PRESETS[0].baseUrl, apiKey: '', kind: PROVIDER_PRESETS[0].kind as string });
@@ -41,7 +43,9 @@ export function SettingsPage() {
   const load = async () => {
     try {
       setProviders(await api.get('/api/providers'));
-      setSettings(await api.get('/api/settings'));
+      const loadedSettings = await api.get('/api/settings');
+      setSettings(loadedSettings);
+      setSearchBackendDraft(loadedSettings['workspace.searchBackend'] || '');
       setDiagnostics(await api.get('/api/diagnostics'));
       setBackups(await api.get('/api/backup/list'));
     } catch (e: any) { setError(e.message); }
@@ -89,6 +93,24 @@ export function SettingsPage() {
 
   const setSetting = (key: string, value: string) => {
     api.put(`/api/settings/${key}`, { value }).then(() => load()).catch(e => push(e.message, 'error'));
+  };
+
+  const saveSearchBackend = async (override?: string) => {
+    const value = (override ?? searchBackendDraft).trim();
+    if (value) {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error();
+      } catch {
+        push('Enter an HTTPS search endpoint without embedded credentials or a fragment.', 'error');
+        return;
+      }
+    }
+    try {
+      await api.put('/api/settings/workspace.searchBackend', { value });
+      push(value ? 'Search backend saved.' : 'Default Brave Search restored.', 'success');
+      await load();
+    } catch (e: any) { push(e.message, 'error'); }
   };
 
   const SectionIcon = SECTIONS.find(s => s.id === section)?.icon || Settings;
@@ -273,6 +295,23 @@ export function SettingsPage() {
                 <option value="run-once-on-startup">Run once on startup</option>
                 <option value="catch-up-within-window">Catch up</option>
               </select>
+            </div>
+          </div>
+        )}
+
+        {section === 'tools' && (
+          <div className="card">
+            <div className="card-title">Web search backend</div>
+            <div className="card-description">
+              Leave this blank to use Brave Search. You can set a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Gnito accepts HTML or SearXNG JSON; snippets are treated as untrusted content.
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="search-backend">Search endpoint URL</label>
+              <input id="search-backend" className="input" value={searchBackendDraft} onChange={event => setSearchBackendDraft(event.target.value)} placeholder="Default Brave Search" data-testid="input-search-backend" />
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn btn-primary" onClick={() => void saveSearchBackend()} data-testid="button-save-search-backend">Save endpoint</button>
+              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use Brave Search default</button>
             </div>
           </div>
         )}

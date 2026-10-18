@@ -124,3 +124,46 @@
   .app-shell.mobile .sidebar .sidebar-logo .sidebar-label { display: flex; }
 }
 .sidebar-backdrop { border: 0; padding: 0; appearance: none; }
+
+.search-source-list { display: grid; gap: 8px; max-width: 760px; }
+.search-source-query { font-size: var(--text-xs); color: var(--color-text-muted); margin-bottom: 2px; }
+.search-source-query span { color: var(--color-text-faint); }
+.search-source-card { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); color: var(--color-text); text-decoration: none; }
+.search-source-card:hover { border-color: var(--color-primary); background: var(--color-surface-2); }
+.search-source-card strong { font-size: var(--text-sm); font-weight: 600; }
+.search-source-url { color: var(--color-primary); font-size: 11px; overflow-wrap: anywhere; }
+.search-source-snippet, .search-source-empty { color: var(--color-text-muted); font-size: var(--text-xs); line-height: 1.55; }
+
+.terminal-page { width: min(100%, 1100px); margin: 0 auto; padding: 28px; display: grid; gap: 18px; }
+.terminal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.terminal-title { margin: 0; font-size: var(--text-xl); letter-spacing: -0.03em; }
+.terminal-description { color: var(--color-text-muted); font-size: var(--text-sm); margin-top: 6px; }
+.terminal-status { display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); font-size: var(--text-sm); }
+.terminal-status.ready { border-color: var(--color-success); }
+.terminal-status.unavailable { border-color: var(--color-warning); }
+.terminal-status-copy { min-width: 0; display: grid; gap: 4px; }
+.terminal-status-copy span { color: var(--color-text-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.terminal-workspace-path { font-family: var(--font-mono); }
+.terminal-command-card { display: grid; gap: 12px; }
+.terminal-command { min-height: 106px; font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.55; }
+.terminal-command-meta { color: var(--color-text-muted); font-size: var(--text-xs); line-height: 1.5; }
+.terminal-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.terminal-run { border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); overflow: hidden; }
+.terminal-run-header { display: flex; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--color-divider); font-size: var(--text-xs); }
+.terminal-run-command { font-family: var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.terminal-run-output { display: grid; gap: 8px; padding: 12px 14px; }
+.terminal-run-output pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; border-radius: 8px; background: var(--color-surface-offset); font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
+.terminal-run-status { border-radius: 999px; padding: 3px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; background: var(--color-neutral-hover); color: var(--color-text-muted); white-space: nowrap; }
+.terminal-run-status.succeeded { background: var(--color-success-highlight); color: var(--color-success); }
+.terminal-run-status.failed, .terminal-run-status.cancelled { background: var(--color-error-highlight); color: var(--color-error); }
+.terminal-setup { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.terminal-setup code { padding: 4px 8px; border-radius: 6px; background: var(--color-surface-offset); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  .terminal-page { padding: 18px 14px 32px; }
+  .terminal-header { flex-direction: column; }
+  .terminal-run-header { flex-direction: column; }
+}
+
+.terminal-runs { display: grid; gap: 10px; }
+.spin { animation: gnito-spin 1s linear infinite; }
+@keyframes gnito-spin { to { transform: rotate(360deg); } }

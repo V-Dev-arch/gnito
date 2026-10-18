@@ -1,6 +1,6 @@
 # Gnito — Implementation Status
 
-Honest report of what is complete vs. partial vs. not implemented. Run `npm run typecheck && npm run lint && npm test && npm run build` to reproduce the current validation checks.
+Honest report of what is complete vs. partial vs. not implemented. Reproduce validation with `npm run typecheck && npm run lint && npm test && npm run build`.
 
 ## Implemented and verified
 
@@ -17,22 +17,23 @@ Honest report of what is complete vs. partial vs. not implemented. Run `npm run 
 | Projects + per-project instructions | Existing API routes and local database support |
 | Memory (opt-in) | Off by default; normal memory APIs are separate from Incognito sessions |
 | File grants (least-privilege) | Existing path checks reject traversal and symlink escapes; write/delete require matching grant permissions |
-| Tool registry + permission gates | Existing approval binds execution to exact stored input |
-| Terminal allowlist | Existing command runner uses `shell:false` and an allowlist |
+| Tool registry + permission gates | Approval is bound to the exact stored input; execution uses an atomic status claim to prevent duplicate runs; tool-run history and first-turn search context linking are covered by tests |
+| Terminal sandbox path | Docker-only image and restricted runner, explicit Terminal page, command history and stop action; non-root server requirement, per-file limit, monitored 256 MiB workspace cap and 128 MiB free-space reserve; tests verify isolation flags and no host fallback. A real container run still requires Docker and the prepared image on the host. |
+| Explicit web search | Opt-in composer toggle, Brave Search fallback with live-verified titles, source links and snippets, custom public HTTPS SearXNG option, bounded response sizes, public-only DNS validation/pinning, redirects blocked, saved source cards and untrusted context sent to the selected model; parser, SSRF and audit-context tests pass. A real provider response using search context was not tested. |
+| Outbound URL safety | The shared fetch layer rejects private, loopback, link-local, unspecified, mapped and special-use IP ranges across DNS answers, pins validated addresses for the request, and bounds response size. `read_url` and web search use it. |
 | Automation Center + scheduler | Existing APIs and scheduler support scheduled and one-shot jobs; see limitations below for model tool chaining |
 | Plugin manifests | zod-validated install/enable/disable/uninstall lifecycle |
 | Encrypted backup + restore | Existing tests cover wrong password, tampering and truncation; restore is transactional |
 | Design system + brand | Dark/light tokens, updated SVG mark/wordmark/favicon; desktop browser smoke test and phone-width layout screenshot |
-| Tests + build | TypeScript, strict lint, 24 tests, production client/server build; provider stream and saved-chat reload smoke-tested locally |
+| Tests + build | TypeScript, strict lint, 37 tests, production client/server build; provider stream and saved-chat reload smoke-tested locally; default Brave web search smoke-tested live |
 
 ## Partial / not implemented
 
 | Feature | Limitation |
 |---|---|
-| Agent loop (multi-step tool calling) | Tool registry + approval flow exist, but chat does not yet perform automatic multi-step tool calling. |
-| Web search | A `web_search` tool implementation exists, but it is not yet orchestrated by chat as an AI tool; backend parsing/default-provider reliability needs more work. |
+| Agent loop (multi-step tool calling) | Chat does not yet let the model autonomously request tools. Web search is user-invoked with a composer toggle; the Terminal page is user-operated. Generic tool approvals are not an AI orchestration loop. |
 | MCP connectors | No MCP client/runtime is implemented. |
-| Terminal isolation | The allowlisted runner executes on the host; it is not a virtual/container sandbox. Do not treat it as isolated. |
+| Terminal container QA | Docker is not installed in the current development sandbox, so an actual container execution could not be smoke-tested here. Gnito reports this as unavailable and never runs the command on the host. The workspace byte cap is a periodic host-side software monitor, not a kernel-enforced filesystem quota; brief write overshoot is possible. |
 | Memory extraction | Memory storage is opt-in, but the assistant does not automatically extract and save memories from chats. |
 | AI task suggestions and pause/resume | Suggestions are not generated contextually by the model; Stop exists, but there is no pause/resume generation flow. |
 | Manus provider | Not enabled: this adapter supports synchronous Chat Completions and Anthropic Messages, not Manus’s distinct asynchronous Responses/Tasks API. |

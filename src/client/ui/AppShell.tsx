@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { MessageSquare, Folder, FileText, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff } from 'lucide-react';
+import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff } from 'lucide-react';
 import { api } from '../lib/api';
 
 interface Props {
@@ -16,6 +16,7 @@ const NAV = [
   { to: '/incognito', label: 'Incognito', icon: EyeOff },
   { to: '/projects', label: 'Projects', icon: Folder },
   { to: '/files', label: 'Files', icon: FileText },
+  { to: '/terminal', label: 'Terminal', icon: Terminal },
   { to: '/automations', label: 'Automation Center', icon: Zap },
   { to: '/plugins', label: 'Plugins', icon: Plug },
   { to: '/settings', label: 'Settings', icon: Settings },

@@ -11,6 +11,7 @@ import { PluginsPage } from './features/plugins/PluginsPage';
 import { SettingsPage } from './features/settings/SettingsPage';
 import { ProjectsPage } from './features/projects/ProjectsPage';
 import { FilesPage } from './features/files/FilesPage';
+import { TerminalPage } from './features/terminal/TerminalPage';
 import { CommandPalette } from './ui/CommandPalette';
 import { NotFoundPage } from './ui/NotFoundPage';
 
@@ -139,6 +140,11 @@ function AppInner() {
           <Route path="/files" component={() => (
             <AppShell theme={theme} setTheme={setTheme} onOpenPalette={() => setPaletteOpen(true)}>
               <FilesPage />
+            </AppShell>
+          )} />
+          <Route path="/terminal" component={() => (
+            <AppShell theme={theme} setTheme={setTheme} onOpenPalette={() => setPaletteOpen(true)}>
+              <TerminalPage />
             </AppShell>
           )} />
           <Route path="/automations" component={() => (

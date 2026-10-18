@@ -18,10 +18,13 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { redactSecrets, truncateForLog } from '../security/redact.js';
+import { fetchPublicUrl } from '../security/publicFetch.js';
+import { getSandboxStatus, runSandboxCommand } from '../sandbox/docker.js';
 
 const db = getDb();
 
 const TOOL_TIMEOUT_MS = 30_000;
+const activeToolControllers = new Map<string, AbortController>();
 
 // ------------------------------------------------------- tool definitions
 
@@ -41,7 +44,7 @@ export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 // --- web_search ---------------------------------------------------------
 TOOL_REGISTRY.set('web_search', {
   name: 'web_search',
-  description: 'Search the public web via the configured search provider (SearXNG or DuckDuckGo fallback).',
+  description: 'Search the public web via the configured search provider (SearXNG or Brave Search fallback).',
   permissions: ['network:web-search'],
   requiresConfirmation: false,
   inputSchema: z.object({
@@ -50,32 +53,35 @@ TOOL_REGISTRY.set('web_search', {
   }),
   execute: async (input, signal) => {
     try {
-      // Call the configured search backend (or default to DuckDuckGo HTML API).
       const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
-      const backendUrl = backend?.value || 'https://duckduckgo.com/html/?q=';
-      const resp = await fetch(`${backendUrl}${encodeURIComponent(input.query)}`, {
-        signal,
-        headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)' },
-      });
-      if (!resp.ok) return { error: `Search returned HTTP ${resp.status}.` };
-      const html = await resp.text();
-      // Simple extraction: DuckDuckGo HTML results have <a class="result__a">Title</a> and <a class="result__snippet">…
-      const results: { title: string; url: string; snippet: string }[] = [];
-      const re = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>[\s\S]*?(?:<a[^>]*class="result__snippet"[^>]*>(.*?)<\/a>)?/g;
-      let m: RegExpExecArray | null;
-      let i = 0;
-      while ((m = re.exec(html)) && i < input.maxResults) {
-        results.push({
-          title: stripHtml(m[2]).trim(),
-          url: m[1].replace(/&/g, '&'),
-          snippet: m[3] ? stripHtml(m[3]).trim() : '',
-        });
-        i++;
+      const backendUrl = backend?.value?.trim() || 'https://search.brave.com/search';
+      const target = new URL(backendUrl);
+      if (target.protocol !== 'https:' || target.username || target.password || target.hash) {
+        return { error: 'Search backend must be a public HTTPS URL without embedded credentials or a fragment.' };
       }
-      return { output: { results } };
+      target.searchParams.set('q', input.query);
+      if (backend?.value && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
+      const resp = await fetchPublicUrl(target, {
+        signal,
+        timeoutMs: 10_000,
+        maxBytes: 1_000_000,
+        headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)', Accept: 'text/html, application/json' },
+      });
+      if (resp.status !== 200) return { error: `Search returned HTTP ${resp.status}. Redirects are not followed; the endpoint may be rate-limiting or challenging automated requests.` };
+      const contentType = resp.headers.get('content-type') || '';
+      const results = /application\/json/i.test(contentType)
+        ? parseSearxResults(resp.body, target, input.maxResults)
+        : /(^|\.)search\.brave\.com$/i.test(target.hostname)
+          ? parseBraveResults(resp.body, target, input.maxResults)
+          : /(^|\.)bing\.com$/i.test(target.hostname)
+            ? parseBingResults(resp.body, target, input.maxResults)
+            : parseDuckDuckGoResults(resp.body, target, input.maxResults);
+      if (!results.length) return { error: 'Search provider returned no parseable results. It may have sent a challenge page or no results for this query; configure a public HTTPS SearXNG endpoint to change providers.' };
+      return { output: { query: input.query, results } };
     } catch (e: any) {
       if (e?.name === 'AbortError') return { error: 'Search timed out.' };
-      return { error: redactSecrets(e?.message || 'Search failed.') };
+      if (/public IP|HTTPS URL|byte limit|Only credential-free|timed out/i.test(String(e?.message || ''))) return { error: e.message };
+      return { error: 'Web search failed. Check the search backend URL, network connection, and provider response.' };
     }
   },
 });
@@ -93,21 +99,17 @@ TOOL_REGISTRY.set('read_url', {
   execute: async (input, signal) => {
     try {
       const u = new URL(input.url);
-      if (!/^https?:$/.test(u.protocol)) return { error: 'Only http(s) URLs are allowed.' };
-      // Block local/private network access (SSRF).
-      if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|::1)/.test(u.hostname)) {
-        return { error: 'Refusing to fetch local/private network URLs.' };
-      }
-      const resp = await fetch(input.url, { signal, redirect: 'manual' });
+      if (!/^https?:$/.test(u.protocol) || u.username || u.password || u.hash) return { error: 'Only credential-free HTTP(S) URLs without fragments are allowed.' };
+      const resp = await fetchPublicUrl(u, { signal, timeoutMs: 10_000, maxBytes: 1_000_000, headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)', Accept: 'text/html, application/json, application/xml, text/plain' } });
       if (resp.status >= 300 && resp.status < 400) {
         return { error: `Redirect to ${resp.headers.get('location')?.slice(0, 100)} — not followed.` };
       }
-      if (!resp.ok) return { error: `Fetch returned HTTP ${resp.status}.` };
+      if (resp.status < 200 || resp.status >= 300) return { error: `Fetch returned HTTP ${resp.status}.` };
       const contentType = resp.headers.get('content-type') || '';
       if (!/text\/|application\/json|application\/xml/.test(contentType)) {
         return { error: `Unsupported content-type: ${contentType}` };
       }
-      const text = await resp.text();
+      const text = resp.body;
       const cleaned = stripHtml(text).slice(0, input.maxChars);
       return { output: { url: input.url, content: cleaned, truncated: text.length > input.maxChars } };
     } catch (e: any) {
@@ -216,49 +218,18 @@ TOOL_REGISTRY.set('files_delete', {
   },
 });
 
-// --- terminal (host, not sandboxed) --------------------------------------
+// --- terminal_run (Docker-only isolated workspace) -----------------------
 TOOL_REGISTRY.set('terminal_run', {
   name: 'terminal_run',
   description:
-    'Run a shell command on the HOST (not sandboxed). HIGH RISK. Requires user confirmation and an explicit allowlist.',
+    'Run a shell command in Gnito’s isolated Docker workspace. Requires user confirmation. The host shell is never used as a fallback.',
   permissions: ['terminal:run'],
   requiresConfirmation: true,
   inputSchema: z.object({
-    command: z.string().min(1).max(1000),
-    args: z.array(z.string()).max(50).default([]),
-    cwd: z.string().max(2000).optional(),
+    command: z.string().min(1).max(10_000),
     timeoutMs: z.number().int().min(1000).max(120_000).default(30_000),
   }),
-  execute: async (input, signal) => {
-    // Validate allowlist (executable name only).
-    const allowlistSetting = db.prepare("SELECT value FROM settings WHERE key = 'workspace.terminalAllowlist'").get() as any;
-    const allowlist: string[] = allowlistSetting ? JSON.parse(allowlistSetting.value) : [];
-    if (!allowlist.includes(input.command)) {
-      return { error: `Command "${input.command}" not in terminal allowlist. Add it in Settings → Tools.` };
-    }
-    try {
-      const { spawn } = await import('node:child_process');
-      // Use shell:false and pass args as an array to prevent shell injection.
-      const cwd = input.cwd && resolveApprovedPath(input.cwd) ? input.cwd : undefined;
-      let childStdout = '';
-      let childStderr = '';
-      const child = spawn(input.command, input.args, { signal, shell: false, cwd });
-      // Deliberately limited env: inherit only PATH (no secrets).
-      child.stdout?.on('data', (d: any) => { if (childStdout.length < 64_000) childStdout += d; });
-      child.stderr?.on('data', (d: any) => { if (childStderr.length < 64_000) childStderr += d; });
-      const exitCode = await new Promise<number>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL');
-          reject(new Error('Command timed out.'));
-        }, input.timeoutMs);
-        child.on('exit', (code) => { clearTimeout(timer); resolve(code ?? 0); });
-        child.on('error', (e) => { clearTimeout(timer); reject(e); });
-      });
-      return { output: { exitCode, stdout: truncateForLog(childStdout, 32_000), stderr: truncateForLog(childStderr, 32_000) } };
-    } catch (e: any) {
-      return { error: redactSecrets(e?.message || 'Command failed.') };
-    }
-  },
+  execute: async (input, signal) => runSandboxCommand(input.command, input.timeoutMs, signal),
 });
 
 // ------------------------------------------------------------- helpers
@@ -312,20 +283,166 @@ function resolveApprovedPath(userPath: string): string | null {
   return g ? pathImport.resolve(g.root, pathImport.normalize(userPath)) : null;
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, code: string) => {
+    const name = code.toLowerCase();
+    if (name === 'amp') return '&';
+    if (name === 'lt') return '<';
+    if (name === 'gt') return '>';
+    if (name === 'quot') return '"';
+    if (name === 'apos' || name === '#39') return "'";
+    if (name === 'nbsp') return ' ';
+    const number = name.startsWith('#x') ? Number.parseInt(name.slice(2), 16) : Number.parseInt(name.slice(1), 10);
+    try { return Number.isFinite(number) && number > 0 && number <= 0x10ffff ? String.fromCodePoint(number) : entity; }
+    catch { return entity; }
+  });
+}
+
 function stripHtml(html: string): string {
-  return html.replace(/<script[\s\S]*?<\/script>/gi, '')
+  return decodeHtmlEntities(html.replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/\s+/g, ' ');
+    .replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+function safeResultUrl(raw: string, base: URL): string | null {
+  try {
+    let url = new URL(decodeHtmlEntities(raw), base);
+    if (url.hostname.endsWith('duckduckgo.com') && url.pathname === '/l/') {
+      const target = url.searchParams.get('uddg');
+      if (!target) return null;
+      url = new URL(target);
+    }
+    if (/(^|\.)bing\.com$/i.test(url.hostname) && url.pathname === '/ck/a') {
+      const encoded = url.searchParams.get('u') || '';
+      if (!encoded.startsWith('a1') || encoded.length > 8_192) return null;
+      const target = Buffer.from(encoded.slice(2), 'base64url').toString('utf8');
+      url = new URL(target);
+    }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    return url.toString().slice(0, 2_048);
+  } catch { return null; }
+}
+
+export function parseBingResults(html: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
+  const results: { title: string; url: string; snippet: string }[] = [];
+  const markers = [...html.matchAll(/<li\b(?=[^>]*\bclass=["'][^"']*\bb_algo\b[^"']*["'])[^>]*>/gi)];
+  for (let index = 0; index < markers.length && results.length < maxResults; index++) {
+    const start = markers[index].index ?? 0;
+    const nextStart = markers[index + 1]?.index;
+    const orderedListEnd = html.indexOf('</ol>', start);
+    const end = nextStart ?? (orderedListEnd >= 0 ? orderedListEnd : html.length);
+    const block = html.slice(start, end);
+    const anchor = block.match(/<h2\b[^>]*>\s*<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/i);
+    if (!anchor) continue;
+    const url = safeResultUrl(anchor[2], base);
+    if (!url) continue;
+    const title = stripHtml(anchor[3]).slice(0, 250);
+    const snippetHtml = block.match(/<div\b[^>]*class=["'][^"']*\bb_caption\b[^"']*["'][^>]*>[\s\S]*?<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] || '';
+    results.push({ title: title || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
+  }
+  return results;
+}
+
+export function parseBraveResults(html: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
+  const results: { title: string; url: string; snippet: string }[] = [];
+  const titles = [...html.matchAll(/<div\b(?=[^>]*\bclass=["'][^"']*\bsearch-snippet-title\b[^"']*["'])[^>]*>([\s\S]*?)<\/div>/gi)];
+  for (let index = 0; index < titles.length; index++) {
+    if (results.length >= maxResults) break;
+    const titleMatch = titles[index];
+    const titleIndex = titleMatch.index ?? -1;
+    if (titleIndex < 0) continue;
+    const anchorStart = html.lastIndexOf('<a ', titleIndex);
+    const anchorEnd = html.indexOf('</a>', titleIndex);
+    if (anchorStart < 0 || anchorEnd < 0) continue;
+    const openingTagEnd = html.indexOf('>', anchorStart);
+    if (openingTagEnd < 0 || openingTagEnd > titleIndex) continue;
+    const openingTag = html.slice(anchorStart, openingTagEnd + 1);
+    const href = openingTag.match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2];
+    const url = href ? safeResultUrl(href, base) : null;
+    if (!url) continue;
+    const regionEnd = titles[index + 1]?.index ?? Math.min(html.length, titleIndex + 5_000);
+    const region = html.slice(titleIndex, regionEnd);
+    const snippetHtml = region.match(/<div\b(?=[^>]*\bclass=["'][^"']*\bgeneric-snippet\b[^"']*["'])[^>]*>[\s\S]*?<div\b(?=[^>]*\bclass=["'][^"']*\bcontent\b[^"']*["'])[^>]*>([\s\S]*?)<\/div>/i)?.[1] || '';
+    results.push({ title: stripHtml(titleMatch[1]).slice(0, 250) || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
+  }
+  return results;
+}
+
+export function parseDuckDuckGoResults(html: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
+  const results: { title: string; url: string; snippet: string }[] = [];
+  const anchors = /<a\b(?=[^>]*\bclass=["'][^"']*\bresult__a\b[^"']*["'])[^>]*>[\s\S]*?<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchors.exec(html)) && results.length < maxResults) {
+    const href = match[0].match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2];
+    const url = href ? safeResultUrl(href, base) : null;
+    if (!url) continue;
+    const title = stripHtml(match[0].replace(/^<a\b[^>]*>/i, '').replace(/<\/a>$/i, '')).slice(0, 250);
+    const afterAnchor = html.slice(match.index + match[0].length, match.index + match[0].length + 2_000);
+    const snippetHtml = afterAnchor.match(/<[^>]*class=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i)?.[1] || '';
+    results.push({ title: title || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
+  }
+  return results;
+}
+
+export function parseSearxResults(body: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
+  const data = JSON.parse(body);
+  if (!Array.isArray(data?.results)) throw new Error('SearXNG returned an invalid result list.');
+  return data.results.slice(0, maxResults).flatMap((result: any) => {
+    const url = typeof result?.url === 'string' ? safeResultUrl(result.url, base) : null;
+    if (!url) return [];
+    return [{
+      title: String(result.title || url).slice(0, 250),
+      url,
+      snippet: stripHtml(String(result.content || result.snippet || '')).slice(0, 1_000),
+    }];
+  });
 }
 
 // -------------------------------------------------------------- routes
 
 export function registerToolRoutes(app: any): void {
+  app.get('/api/tools/sandbox/status', async (_req: Request, res: Response) => {
+    res.json(await getSandboxStatus());
+  });
+
+  // Explicit user-invoked web search: this low-risk tool does not need a second confirmation.
+  app.post('/api/tools/web-search', async (req: Request, res: Response) => {
+    const tool = TOOL_REGISTRY.get('web_search');
+    if (!tool) { res.status(503).json({ error: 'Web search is unavailable.' }); return; }
+    const parsed = tool.inputSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'validation', message: 'Provide a search query of at most 500 characters.' }); return; }
+    const context = typeof req.body?.chatId === 'string' ? req.body.chatId.slice(0, 200) : null;
+    if (context && !db.prepare('SELECT id FROM chats WHERE id = ?').get(context)) {
+      res.status(404).json({ error: 'not-found', message: 'The selected chat no longer exists.' });
+      return;
+    }
+    const runId = randomUUID();
+    const startedAt = Date.now();
+    db.prepare('INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)')
+      .run(runId, tool.name, JSON.stringify(parsed.data), 'running', startedAt, context);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    try {
+      const result = await tool.execute(parsed.data, controller.signal);
+      clearTimeout(timer);
+      if (result.error) {
+        db.prepare("UPDATE tool_runs SET status='failed', ended_at=?, error=? WHERE id=?")
+          .run(Date.now(), truncateForLog(result.error), runId);
+        res.status(502).json({ runId, error: result.error });
+        return;
+      }
+      db.prepare("UPDATE tool_runs SET status='succeeded', ended_at=?, output=? WHERE id=?")
+        .run(Date.now(), JSON.stringify(redactObject(result.output ?? null)), runId);
+      res.json({ runId, status: 'succeeded', output: result.output });
+    } catch {
+      clearTimeout(timer);
+      db.prepare("UPDATE tool_runs SET status='failed', ended_at=?, error=? WHERE id=?")
+        .run(Date.now(), 'Web search failed.', runId);
+      res.status(502).json({ runId, error: 'Web search failed. Retry or check the search backend.' });
+    }
+  });
+
   // List tools (without execute).
   app.get('/api/tools', (_req: Request, res: Response) => {
     const out = Array.from(TOOL_REGISTRY.values()).map(t => ({
@@ -346,8 +463,9 @@ export function registerToolRoutes(app: any): void {
     const runId = randomUUID();
     // Store the FULL input (not redacted) so approval binds to exact args;
     // redaction only applies to what we log/display.
-    db.prepare(`INSERT INTO tool_runs (id, tool, input, status, started_at) VALUES (?,?,?,?,?)`)
-      .run(runId, tool.name, JSON.stringify(parsed.data), 'pending-approval', Date.now());
+    const context = typeof req.body?.context === 'string' ? req.body.context.slice(0, 200) : null;
+    db.prepare(`INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)`)
+      .run(runId, tool.name, JSON.stringify(parsed.data), 'pending-approval', Date.now(), context);
     res.status(201).json({ runId, requiresConfirmation: tool.requiresConfirmation });
   });
 
@@ -356,8 +474,8 @@ export function registerToolRoutes(app: any): void {
     const row = db.prepare(`SELECT * FROM tool_runs WHERE id = ?`).get(req.params.runId) as any;
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
     if (row.status !== 'pending-approval') { res.status(409).json({ error: 'not-pending' }); return; }
-    // Approving changes status to "running" but execution happens via /execute.
-    db.prepare(`UPDATE tool_runs SET status='approved' WHERE id=?`).run(req.params.runId);
+    const updated = db.prepare(`UPDATE tool_runs SET status='approved' WHERE id=? AND status='pending-approval'`).run(req.params.runId);
+    if (updated.changes !== 1) { res.status(409).json({ error: 'not-pending' }); return; }
     res.json({ ok: true });
   });
 
@@ -365,7 +483,42 @@ export function registerToolRoutes(app: any): void {
   app.post('/api/tools/runs/:runId/deny', (req: Request, res: Response) => {
     const row = db.prepare(`SELECT * FROM tool_runs WHERE id = ?`).get(req.params.runId) as any;
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
-    db.prepare(`UPDATE tool_runs SET status='denied', ended_at=? WHERE id=?`).run(Date.now(), req.params.runId);
+    const updated = db.prepare(`UPDATE tool_runs SET status='denied', ended_at=? WHERE id=? AND status='pending-approval'`).run(Date.now(), req.params.runId);
+    if (updated.changes !== 1) { res.status(409).json({ error: 'not-pending' }); return; }
+    res.json({ ok: true });
+  });
+
+  app.patch('/api/tools/runs/:runId/context', (req: Request, res: Response) => {
+    const parsed = z.object({ chatId: z.string().min(1).max(200) }).safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'validation' }); return; }
+    if (!db.prepare('SELECT id FROM chats WHERE id = ?').get(parsed.data.chatId)) {
+      res.status(404).json({ error: 'chat-not-found' });
+      return;
+    }
+    const row = db.prepare('SELECT status, context FROM tool_runs WHERE id = ?').get(req.params.runId) as any;
+    if (!row) { res.status(404).json({ error: 'not-found' }); return; }
+    if (row.context === parsed.data.chatId) { res.json({ ok: true }); return; }
+    if (row.status !== 'succeeded' || row.context) { res.status(409).json({ error: 'context-already-set-or-run-not-succeeded' }); return; }
+    const updated = db.prepare("UPDATE tool_runs SET context=? WHERE id=? AND context IS NULL AND status='succeeded'")
+      .run(parsed.data.chatId, req.params.runId);
+    if (updated.changes !== 1) { res.status(409).json({ error: 'context-already-set-or-run-not-succeeded' }); return; }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/tools/runs/:runId/cancel', (req: Request, res: Response) => {
+    const row = db.prepare('SELECT * FROM tool_runs WHERE id = ?').get(req.params.runId) as any;
+    if (!row) { res.status(404).json({ error: 'not-found' }); return; }
+    if (row.status === 'pending-approval' || row.status === 'approved') {
+      const updated = db.prepare("UPDATE tool_runs SET status='cancelled', ended_at=? WHERE id=? AND status IN ('pending-approval','approved')")
+        .run(Date.now(), req.params.runId);
+      if (updated.changes !== 1) { res.status(409).json({ error: 'not-cancellable' }); return; }
+      res.json({ ok: true });
+      return;
+    }
+    if (row.status !== 'running') { res.status(409).json({ error: 'not-running' }); return; }
+    const controller = activeToolControllers.get(req.params.runId);
+    if (!controller) { res.status(409).json({ error: 'not-cancellable' }); return; }
+    controller.abort();
     res.json({ ok: true });
   });
 
@@ -381,19 +534,25 @@ export function registerToolRoutes(app: any): void {
     // request-body args are ignored, so approval cannot be bypassed.
     const approvedInput = row.input;
 
-    db.prepare(`UPDATE tool_runs SET status='running' WHERE id=?`).run(req.params.runId);
+    let input: any;
+    try { input = JSON.parse(approvedInput); }
+    catch { res.status(500).json({ error: 'Stored command input is invalid.' }); return; }
+    const claimed = db.prepare("UPDATE tool_runs SET status='running' WHERE id=? AND status='approved'").run(req.params.runId);
+    if (claimed.changes !== 1) { res.status(409).json({ error: 'not-approved' }); return; }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TOOL_TIMEOUT_MS);
-    req.on('close', () => controller.abort());
+    activeToolControllers.set(req.params.runId, controller);
+    const executionTimeoutMs = tool.name === 'terminal_run' ? Math.min(input.timeoutMs || TOOL_TIMEOUT_MS, 120_000) + 45_000 : TOOL_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(), executionTimeoutMs);
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
 
     try {
-      const input = JSON.parse(approvedInput);
       const result = await tool.execute(input, controller.signal);
       clearTimeout(timer);
       if (result.error) {
-        db.prepare(`UPDATE tool_runs SET status='failed', ended_at=?, error=?, output=? WHERE id=?`)
-          .run(Date.now(), truncateForLog(result.error), JSON.stringify(redactObject(result.output ?? null)), req.params.runId);
-        res.json({ status: 'failed', error: result.error });
+        const status = controller.signal.aborted ? 'cancelled' : 'failed';
+        db.prepare(`UPDATE tool_runs SET status=?, ended_at=?, error=?, output=? WHERE id=?`)
+          .run(status, Date.now(), truncateForLog(result.error), JSON.stringify(redactObject(result.output ?? null)), req.params.runId);
+        res.json({ status, error: result.error });
       } else {
         db.prepare(`UPDATE tool_runs SET status='succeeded', ended_at=?, output=? WHERE id=?`)
           .run(Date.now(), JSON.stringify(redactObject(result.output ?? null)), req.params.runId);
@@ -401,9 +560,13 @@ export function registerToolRoutes(app: any): void {
       }
     } catch (e: any) {
       clearTimeout(timer);
-      db.prepare(`UPDATE tool_runs SET status='failed', ended_at=?, error=? WHERE id=?`)
-        .run(Date.now(), truncateForLog(redactSecrets(e?.message || 'Execution failed')), req.params.runId);
-      res.json({ status: 'failed', error: redactSecrets(e?.message || 'Execution failed') });
+      const status = controller.signal.aborted ? 'cancelled' : 'failed';
+      const message = redactSecrets(e?.message || 'Execution failed');
+      db.prepare(`UPDATE tool_runs SET status=?, ended_at=?, error=? WHERE id=?`)
+        .run(status, Date.now(), truncateForLog(message), req.params.runId);
+      res.json({ status, error: message });
+    } finally {
+      activeToolControllers.delete(req.params.runId);
     }
   });
 

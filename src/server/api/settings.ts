@@ -26,6 +26,7 @@ const SETTINGS_KEYS = new Set([
   'chat.enterToSend',
   'composer.defaultModel',
   'workspace.approvedFolders', // JSON list of FileGrant
+  'workspace.searchBackend',   // optional public HTTPS HTML or SearXNG JSON endpoint
   'diagnostics.redactOnExport',
   'ui.sidebarCollapsed',
 ]);
@@ -55,6 +56,15 @@ export function registerSettingsRoutes(app: any): void {
     }
     const parsed = z.object({ value: z.string().max(10_000) }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation' }); return; }
+    if (key === 'workspace.searchBackend' && parsed.data.value.trim()) {
+      try {
+        const url = new URL(parsed.data.value.trim());
+        if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error();
+      } catch {
+        res.status(400).json({ error: 'validation', message: 'Search backend must be an HTTPS URL without embedded credentials or a fragment.' });
+        return;
+      }
+    }
     setSetting(key, parsed.data.value);
     res.json({ ok: true });
   });

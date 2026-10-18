@@ -79,9 +79,11 @@ prevented by a unique `(automation_id, occurrence_key)` index on
 Each tool in `TOOL_REGISTRY` declares a zod input schema, required
 permissions, whether it requires user confirmation, and an async
 `execute(input, signal)`. High-risk tools (`files_write`, `files_delete`,
-`terminal_run`) cannot execute without a user-issued approval — the agent
-creates a `pending-approval` run, the user approves, and only then does
-`execute` run.
+`terminal_run`) cannot execute without a user-issued approval: a request is
+stored as `pending-approval`, the user approves the exact saved input, and
+only then does `execute` run. The Terminal page uses this flow. The chat does
+not yet implement automatic model-directed tool calling; Web search is an
+explicit user-enabled pre-search step.
 
 ## Provider adapters
 
