@@ -12,7 +12,7 @@ export const SANDBOX_WORKSPACE = path.join(DATA_DIR, 'sandbox-workspace');
 export const MAX_WORKSPACE_BYTES = 256 * 1024 * 1024;
 const DISK_FREE_RESERVE_BYTES = 128 * 1024 * 1024;
 const MAX_OUTPUT_CHARS = 32_000;
-const MAX_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 300_000;
 const WORKSPACE_SCAN_INTERVAL_MS = 250;
 const CLEANUP_TIMEOUT_MS = 2_000;
 
@@ -80,6 +80,7 @@ export function buildDockerRunArgs(options: {
   image?: string;
   uid: number;
   gid: number;
+  networkAccess?: boolean;
 }): string[] {
   if (!Number.isInteger(options.uid) || options.uid < 1) throw new Error('Sandbox commands must use a non-root UID.');
   if (!Number.isInteger(options.gid) || options.gid < 0) throw new Error('Sandbox group ID is invalid.');
@@ -87,12 +88,14 @@ export function buildDockerRunArgs(options: {
   return [
     'run', '--rm', '--pull=never', '--init', '--name', options.containerName,
     '--label', 'com.gnito.terminal-sandbox=true',
-    '--network=none', '--read-only', '--cap-drop=ALL',
+    `--network=${options.networkAccess ? 'bridge' : 'none'}`, '--read-only', '--cap-drop=ALL',
     '--security-opt=no-new-privileges:true', '--pids-limit=64',
     '--memory=512m', '--cpus=1', '--ulimit', 'nofile=256:256', '--ulimit', 'fsize=134217728:134217728',
     '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777',
     '--user', `${options.uid}:${options.gid}`,
-    '--env', 'HOME=/tmp',
+    '--env', 'HOME=/workspace/.home',
+    '--env', 'XDG_CONFIG_HOME=/workspace/.home/.config',
+    '--env', 'GH_CONFIG_DIR=/workspace/.home/.config/gh',
     '--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     '--env', 'LANG=C.UTF-8',
     '--mount', `type=bind,source=${options.workspaceDir},target=/workspace`,
@@ -115,6 +118,17 @@ function ensureWorkspace(): string {
     fs.mkdirSync(workspace, { mode: 0o700 });
   }
   fs.chmodSync(workspace, 0o700);
+  const home = path.join(workspace, '.home');
+  try {
+    const stats = fs.lstatSync(home);
+    if (stats.isSymbolicLink() || !stats.isDirectory() || (typeof process.getuid === 'function' && stats.uid !== process.getuid())) {
+      throw new Error('The persistent sandbox home path is not a trusted directory.');
+    }
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') throw error;
+    fs.mkdirSync(home, { mode: 0o700 });
+  }
+  fs.chmodSync(home, 0o700);
   return fs.realpathSync(workspace);
 }
 
@@ -183,7 +197,7 @@ function cancelledError(cleanupVerified: boolean, reason: 'timeout' | 'cancelled
   return `Terminal command cancelled.${suffix}`;
 }
 
-export async function runSandboxCommand(command: string, timeoutMs: number, signal: AbortSignal): Promise<{ output?: { exitCode: number; stdout: string; stderr: string }; error?: string }> {
+export async function runSandboxCommand(command: string, timeoutMs: number, signal: AbortSignal, options: { networkAccess?: boolean; onOutput?: (output: { stdout: string; stderr: string }) => void } = {}): Promise<{ output?: { exitCode: number; stdout: string; stderr: string }; error?: string }> {
   const normalizedTimeout = Math.min(Math.max(timeoutMs, 1_000), MAX_TIMEOUT_MS);
   const status = await getSandboxStatus();
   if (!status.available) {
@@ -216,7 +230,7 @@ export async function runSandboxCommand(command: string, timeoutMs: number, sign
   const group = typeof process.getgid === 'function' ? process.getgid() : 1000;
   const gid = group === 0 ? 1000 : group;
   let args: string[];
-  try { args = buildDockerRunArgs({ command, containerName, workspaceDir: workspace, uid, gid }); }
+  try { args = buildDockerRunArgs({ command, containerName, workspaceDir: workspace, uid, gid, networkAccess: options.networkAccess }); }
   catch (error: any) { return { error: error?.message || 'Terminal sandbox configuration is invalid.' }; }
 
   return new Promise(resolve => {
@@ -268,8 +282,15 @@ export async function runSandboxCommand(command: string, timeoutMs: number, sign
       }
     }, WORKSPACE_SCAN_INTERVAL_MS);
 
-    child.stdout?.on('data', (data: Buffer) => { if (stdout.length < MAX_OUTPUT_CHARS) stdout += data.toString('utf8').slice(0, MAX_OUTPUT_CHARS - stdout.length); });
-    child.stderr?.on('data', (data: Buffer) => { if (stderr.length < MAX_OUTPUT_CHARS) stderr += data.toString('utf8').slice(0, MAX_OUTPUT_CHARS - stderr.length); });
+    const publishOutput = () => options.onOutput?.({ stdout, stderr });
+    child.stdout?.on('data', (data: Buffer) => {
+      if (stdout.length < MAX_OUTPUT_CHARS) stdout += data.toString('utf8').slice(0, MAX_OUTPUT_CHARS - stdout.length);
+      publishOutput();
+    });
+    child.stderr?.on('data', (data: Buffer) => {
+      if (stderr.length < MAX_OUTPUT_CHARS) stderr += data.toString('utf8').slice(0, MAX_OUTPUT_CHARS - stderr.length);
+      publishOutput();
+    });
     child.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') finish({ error: 'Docker CLI disappeared before the terminal sandbox could start. The host shell was not used.' });
       else finish({ error: 'Docker could not start the isolated terminal container.' });

@@ -54,6 +54,7 @@ export function SettingsPage() {
 
   const addProvider = async () => {
     if (!newProvider.label || !newProvider.baseUrl) { push('Label and base URL are required.', 'error'); return; }
+    if (newProvider.kind !== 'custom' && !newProvider.apiKey.trim()) { push('Add an API key for this provider.', 'error'); return; }
     try {
       const { apiKey, ...providerInput } = newProvider;
       await api.post('/api/providers', { ...providerInput, ...(apiKey ? { apiKey } : {}) });
@@ -165,7 +166,7 @@ export function SettingsPage() {
               <div className="card-title">Add a provider</div>
               <div className="card-description">
                 Bring your own key. Costs, quotas, and data policies depend on the provider.
-                Keys are stored encrypted in your local Gnito data dir and never leave your machine except to call the provider. Manus uses an asynchronous Responses/Tasks API and is not a chat-completions provider here yet.
+                Keys are stored encrypted in your local Gnito data dir and sent only to the selected provider. Manus runs remotely on Manus infrastructure; it does not use Gnito’s local sandbox or MCP connectors.
               </div>
               <div className="field-row">
                 <div className="field">
@@ -179,7 +180,6 @@ export function SettingsPage() {
                   }} data-testid="select-provider-kind">
                     {PROVIDER_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
                     <option value="custom">Custom OpenAI-compatible</option>
-                    <option value="manus" disabled>Manus API — not compatible yet</option>
                   </select>
                 </div>
                 <div className="field">
@@ -191,7 +191,7 @@ export function SettingsPage() {
                 <label className="label" htmlFor="sp-url">Base URL</label>
                 <input id="sp-url" className="input" value={newProvider.baseUrl} onChange={e => setNewProvider({ ...newProvider, baseUrl: e.target.value })} placeholder="https://your-provider.example/v1" readOnly={presetId !== 'custom'} data-testid="input-provider-url" />
               </div>
-              <div className="provider-note">{presetId === 'custom' ? 'Use the API root for an OpenAI-compatible endpoint. Model discovery uses its /models route.' : `Preset includes the provider API root. Add your own key; ${MANUS_PROVIDER_NOTICE}`}</div>
+              <div className="provider-note">{presetId === 'custom' ? 'Use the API root for an OpenAI-compatible endpoint. Model discovery uses its /models route.' : presetId === 'manus' ? `${MANUS_PROVIDER_NOTICE} Choose a Manus agent profile below rather than a model ID.` : 'Preset includes the official provider API root. Add your own API key to connect.'}</div>
               <div className="field">
                 <label className="label" htmlFor="sp-key">API key (stored encrypted, never shown again)</label>
                 <input id="sp-key" type="password" className="input" value={newProvider.apiKey} onChange={e => setNewProvider({ ...newProvider, apiKey: e.target.value })} placeholder="sk-…" data-testid="input-provider-key" />

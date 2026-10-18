@@ -44,7 +44,7 @@ export const api = {
   delete: <T = any>(path: string, body?: any) => request<T>('DELETE', path, body),
 
   /** Stream a chat response via SSE. Returns AbortController synchronously for cancellation. */
-  streamChat: (providerId: string, body: any, onChunk: (delta: string) => void, onEnd: (finalText: string) => void, onError: (msg: string) => void, incognito = false): AbortController => {
+  streamChat: (providerId: string, body: any, onChunk: (delta: string) => void, onEnd: (finalText: string) => void, onError: (msg: string) => void, incognito = false, onActivity?: (message: string) => void, onToolEvent?: (event: any) => void): AbortController => {
     const controller = new AbortController();
     let finalText = '';
 
@@ -98,6 +98,10 @@ export const api = {
             }
             if (name === 'chunk') {
               try { const d = JSON.parse(data).delta || ''; finalText += d; onChunk(d); } catch {}
+            } else if (name === 'activity') {
+              try { onActivity?.(JSON.parse(data).message || ''); } catch {}
+            } else if (name === 'tool-start' || name === 'tool-output' || name === 'tool-end') {
+              try { onToolEvent?.(JSON.parse(data)); } catch {}
             } else if (name === 'error') {
               try { onError(JSON.parse(data).message || 'Unknown error'); } catch { onError('Unknown error'); }
               return;

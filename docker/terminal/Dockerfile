@@ -7,6 +7,7 @@ RUN apk add --no-cache \
     findutils \
     gawk \
     git \
+    github-cli \
     jq \
     nodejs \
     npm \

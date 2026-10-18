@@ -35,7 +35,7 @@ interface ToolDef {
   requiresConfirmation: boolean;
   inputSchema: z.ZodTypeAny;
   /** Execute the tool. Returns { output, error } — never throws raw exceptions. */
-  execute: (input: any, signal: AbortSignal) => Promise<{ output?: any; error?: string }>;
+  execute: (input: any, signal: AbortSignal, options?: { onOutput?: (output: any) => void }) => Promise<{ output?: any; error?: string }>;
 }
 
 /** All registered tools. */
@@ -222,15 +222,81 @@ TOOL_REGISTRY.set('files_delete', {
 TOOL_REGISTRY.set('terminal_run', {
   name: 'terminal_run',
   description:
-    'Run a shell command in Gnito’s isolated Docker workspace. Requires user confirmation. The host shell is never used as a fallback.',
+    'Run a shell command in Gnito’s isolated Docker workspace. The host shell is never used as a fallback. Internet access is opt-in for each chat request.',
   permissions: ['terminal:run'],
   requiresConfirmation: true,
   inputSchema: z.object({
     command: z.string().min(1).max(10_000),
-    timeoutMs: z.number().int().min(1000).max(120_000).default(30_000),
+    timeoutMs: z.number().int().min(1000).max(300_000).default(60_000),
+    networkAccess: z.boolean().default(false),
   }),
-  execute: async (input, signal) => runSandboxCommand(input.command, input.timeoutMs, signal),
+  execute: async (input, signal, options) => runSandboxCommand(input.command, input.timeoutMs, signal, {
+    networkAccess: input.networkAccess,
+    onOutput: options?.onOutput,
+  }),
 });
+
+/** Run an agent tool only after the chat request explicitly granted its capability. */
+export async function executeAgentTerminal(input: unknown, options: {
+  chatId: string;
+  allowNetwork: boolean;
+  signal: AbortSignal;
+  onEvent?: (event: Record<string, unknown>) => void;
+}): Promise<{ runId: string; status: string; output?: any; error?: string }> {
+  const tool = TOOL_REGISTRY.get('terminal_run');
+  if (!tool) throw new Error('Terminal tool is unavailable.');
+  const parsed = tool.inputSchema.safeParse(input);
+  if (!parsed.success) throw new Error(`Terminal tool arguments are invalid: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
+  const value = parsed.data as { command: string; timeoutMs: number; networkAccess: boolean };
+  const runId = randomUUID();
+  const startedAt = Date.now();
+  const context = options.chatId.slice(0, 200);
+  db.prepare('INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)')
+    .run(runId, tool.name, JSON.stringify(value), 'approved', startedAt, context);
+
+  if (value.networkAccess && !options.allowNetwork) {
+    const message = 'Network permission was not enabled for this chat message. Ask the user to enable it before retrying.';
+    db.prepare("UPDATE tool_runs SET status='denied', ended_at=?, error=? WHERE id=?")
+      .run(Date.now(), message, runId);
+    options.onEvent?.({ type: 'end', runId, status: 'denied', command: value.command, networkAccess: false, error: message });
+    return { runId, status: 'denied', error: message };
+  }
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (options.signal.aborted) controller.abort();
+  else options.signal.addEventListener('abort', abort, { once: true });
+  activeToolControllers.set(runId, controller);
+  db.prepare("UPDATE tool_runs SET status='running' WHERE id=? AND status='approved'").run(runId);
+  options.onEvent?.({ type: 'start', runId, tool: tool.name, command: value.command, networkAccess: value.networkAccess });
+
+  try {
+    const result = await tool.execute(value, controller.signal, {
+      onOutput: output => {
+        const safeOutput = redactObject(output);
+        db.prepare("UPDATE tool_runs SET output=? WHERE id=? AND status='running'")
+          .run(JSON.stringify(safeOutput), runId);
+        options.onEvent?.({ type: 'output', runId, output: safeOutput });
+      },
+    });
+    const status = result.error ? (controller.signal.aborted ? 'cancelled' : 'failed') : 'succeeded';
+    const output = redactObject(result.output ?? null);
+    db.prepare('UPDATE tool_runs SET status=?, ended_at=?, error=?, output=? WHERE id=?')
+      .run(status, Date.now(), result.error ? truncateForLog(redactSecrets(result.error)) : null, JSON.stringify(output), runId);
+    options.onEvent?.({ type: 'end', runId, status, command: value.command, networkAccess: value.networkAccess, output, error: result.error ? redactSecrets(result.error) : undefined });
+    return { runId, status, output, error: result.error };
+  } catch (error: any) {
+    const status = controller.signal.aborted ? 'cancelled' : 'failed';
+    const message = redactSecrets(error?.message || 'Terminal execution failed.');
+    db.prepare('UPDATE tool_runs SET status=?, ended_at=?, error=? WHERE id=?')
+      .run(status, Date.now(), truncateForLog(message), runId);
+    options.onEvent?.({ type: 'end', runId, status, command: value.command, networkAccess: value.networkAccess, error: message });
+    return { runId, status, error: message };
+  } finally {
+    options.signal.removeEventListener('abort', abort);
+    activeToolControllers.delete(runId);
+  }
+}
 
 // ------------------------------------------------------------- helpers
 
@@ -541,12 +607,17 @@ export function registerToolRoutes(app: any): void {
     if (claimed.changes !== 1) { res.status(409).json({ error: 'not-approved' }); return; }
     const controller = new AbortController();
     activeToolControllers.set(req.params.runId, controller);
-    const executionTimeoutMs = tool.name === 'terminal_run' ? Math.min(input.timeoutMs || TOOL_TIMEOUT_MS, 120_000) + 45_000 : TOOL_TIMEOUT_MS;
+    const executionTimeoutMs = tool.name === 'terminal_run' ? Math.min(input.timeoutMs || TOOL_TIMEOUT_MS, 300_000) + 45_000 : TOOL_TIMEOUT_MS;
     const timer = setTimeout(() => controller.abort(), executionTimeoutMs);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
 
     try {
-      const result = await tool.execute(input, controller.signal);
+      const result = await tool.execute(input, controller.signal, {
+        onOutput: (output: any) => {
+          db.prepare("UPDATE tool_runs SET output=? WHERE id=? AND status='running'")
+            .run(JSON.stringify(redactObject(output)), req.params.runId);
+        },
+      });
       clearTimeout(timer);
       if (result.error) {
         const status = controller.signal.aborted ? 'cancelled' : 'failed';

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, CircleAlert, LoaderCircle, Play, RefreshCw, Square, Terminal } from 'lucide-react';
+import { CheckCircle2, CircleAlert, LoaderCircle, Play, RefreshCw, Square, Terminal, Wifi } from 'lucide-react';
 import { api } from '../../lib/api';
 
 interface SandboxStatus {
@@ -30,6 +30,11 @@ function runCommand(run: ToolRun): string {
   catch { return ''; }
 }
 
+function runUsesNetwork(run: ToolRun): boolean {
+  try { return JSON.parse(run.input)?.networkAccess === true; }
+  catch { return false; }
+}
+
 function runOutput(run: ToolRun): { exitCode?: number; stdout?: string; stderr?: string } | null {
   try {
     const result = typeof run.output === 'string' ? JSON.parse(run.output) : run.output;
@@ -51,6 +56,8 @@ export function TerminalPage() {
   const [status, setStatus] = useState<SandboxStatus | null>(null);
   const [runs, setRuns] = useState<ToolRun[]>([]);
   const [command, setCommand] = useState('pwd && ls -la');
+  const [networkAccess, setNetworkAccess] = useState(false);
+  const [timeoutMs, setTimeoutMs] = useState(300_000);
   const [running, setRunning] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +101,8 @@ export function TerminalPage() {
     try {
       const request = await api.post('/api/tools/terminal_run/request', {
         command: exactCommand,
-        timeoutMs: 60_000,
+        timeoutMs,
+        networkAccess,
         context: 'terminal-ui',
       });
       setActiveRunId(request.runId);
@@ -152,7 +160,18 @@ export function TerminalPage() {
         <div>
           <label className="label" htmlFor="terminal-command">Command</label>
           <textarea id="terminal-command" className="textarea terminal-command" value={command} onChange={event => setCommand(event.target.value)} placeholder="Enter a shell command" disabled={!status?.available || running} data-testid="input-terminal-command" />
-          <p className="terminal-command-meta">Review the exact command before running it. No other host directories are mounted. Network access is disabled in the container. Each run is limited to 60 seconds and 512 MB of memory; Gnito monitors the persistent workspace against a 256 MiB cap and preserves 128 MiB of host disk headroom.</p>
+          <div className="terminal-options">
+            <label className="terminal-network-toggle">
+              <input type="checkbox" checked={networkAccess} onChange={event => setNetworkAccess(event.target.checked)} disabled={!status?.available || running} />
+              <span><strong><Wifi size={14} /> Allow outbound network for this run</strong><small>Off by default. When enabled, commands can reach the public internet and network destinations reachable from Docker.</small></span>
+            </label>
+            <label className="terminal-timeout-select">Timeout
+              <select className="select" value={timeoutMs} onChange={event => setTimeoutMs(Number(event.target.value))} disabled={running}>
+                <option value={60_000}>1 minute</option><option value={180_000}>3 minutes</option><option value={300_000}>5 minutes</option>
+              </select>
+            </label>
+          </div>
+          <p className="terminal-command-meta">Review the exact command before running it. Only the Gnito sandbox workspace is mounted; no host credentials are injected. A persistent sandbox home stores CLI configuration inside that workspace, so treat saved credentials as local secrets. Interactive stdin is not supported; for GitHub use <code>gh auth login --web --hostname github.com --git-protocol https</code> and follow the device-code prompt shown in live output. Docker memory is limited to 512 MB; workspace usage is capped at 256 MiB and Gnito preserves 128 MiB of host disk headroom.</p>
         </div>
         <div className="terminal-actions">
           <button className="btn btn-primary" onClick={() => void run()} disabled={!status?.available || !command.trim() || running} data-testid="button-run-terminal">
@@ -174,7 +193,7 @@ export function TerminalPage() {
             return <article className="terminal-run" key={run.id} data-testid={`terminal-run-${run.id}`}>
               <div className="terminal-run-header">
                 <code className="terminal-run-command">{runCommand(run) || '(command unavailable)'}</code>
-                <span className={`terminal-run-status ${run.status}`}>{run.status}{output?.exitCode !== undefined ? ` · exit ${output.exitCode}` : ''}</span>
+                <span className={`terminal-run-status ${run.status}`}>{runUsesNetwork(run) ? 'network · ' : ''}{run.status}{output?.exitCode !== undefined ? ` · exit ${output.exitCode}` : ''}</span>
               </div>
               {(parts || run.error) && <div className="terminal-run-output"><pre>{[parts, run.error ? `Error: ${run.error}` : ''].filter(Boolean).join('\n')}</pre></div>}
             </article>;

@@ -117,6 +117,11 @@ describe('Docker terminal sandbox', () => {
     expect(() => buildDockerRunArgs({ command: 'id', containerName: 'root-test', workspaceDir: '/tmp/ws', uid: 0, gid: 0 })).toThrow('non-root UID');
   });
 
+  it('uses Docker bridge networking only when network access is explicitly enabled', () => {
+    const args = buildDockerRunArgs({ command: 'curl https://example.com', containerName: 'gnito-terminal-network-test', workspaceDir: '/tmp/gnito-workspace', uid: 1000, gid: 1000, networkAccess: true });
+    expect(args).toContain('--network=bridge');
+  });
+
   it('reports an unavailable runtime and never executes the command on the host', async () => {
     const status = await getSandboxStatus();
     expect(status.available).toBe(false);

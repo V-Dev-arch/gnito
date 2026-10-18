@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 // ---------------------------------------------------------------- providers
 
-export const ProviderKindSchema = z.enum(['openai-compatible', 'anthropic-compatible', 'custom']);
+export const ProviderKindSchema = z.enum(['openai-compatible', 'anthropic-compatible', 'manus-agent', 'custom']);
 export type ProviderKind = z.infer<typeof ProviderKindSchema>;
 
 /** Non-secret provider configuration (safe to send to client). */

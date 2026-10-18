@@ -155,7 +155,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
 
       <main className="app-main" style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', flex: 1 }}>
         {isMobile && !mobileOpen && (
-          <header style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--color-divider)' }}>
+          <header className="mobile-topbar" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--color-divider)' }}>
             <button
               className="btn btn-ghost btn-icon"
               onClick={() => setMobileOpen(true)}

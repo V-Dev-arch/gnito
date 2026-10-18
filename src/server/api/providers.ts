@@ -19,8 +19,15 @@ import { z } from 'zod';
 import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
+import { executeAgentTerminal } from './tools.js';
 
 const db = getDb();
+const MANUS_API_ROOT = 'https://api.manus.ai';
+const MANUS_PROFILES: ModelInfo[] = [
+  { id: 'lite', label: 'Manus Lite', capabilities: ['text'] },
+  { id: 'standard', label: 'Manus Standard', capabilities: ['text'] },
+  { id: 'max', label: 'Manus Max', capabilities: ['text'] },
+];
 
 // -------------------------------------------------------------- validation
 
@@ -34,7 +41,7 @@ const ProviderBaseUrl = z.string().url().max(500).refine(value => {
 }, 'Use an HTTP(S) API URL without embedded credentials, query parameters, or a fragment.');
 
 const CreateProviderInput = z.object({
-  kind: z.enum(['openai-compatible', 'anthropic-compatible', 'custom']),
+  kind: z.enum(['openai-compatible', 'anthropic-compatible', 'manus-agent', 'custom']),
   label: z.string().min(1).max(100),
   baseUrl: ProviderBaseUrl,
   apiKey: z.string().min(1).max(500).optional(),
@@ -77,6 +84,10 @@ export function registerProviderRoutes(app: any): void {
       return;
     }
     const { kind, label, baseUrl, apiKey, customHeaders, enabled } = parsed.data;
+    if (kind === 'manus-agent' && baseUrl.replace(/\/+$/, '') !== MANUS_API_ROOT) {
+      res.status(400).json({ error: 'validation', message: 'Manus must use its official API root.' });
+      return;
+    }
     const id = randomUUID();
     const now = Date.now();
     if (apiKey) setProviderSecret(id, apiKey);
@@ -95,6 +106,10 @@ export function registerProviderRoutes(app: any): void {
     const parsed = UpdateProviderInput.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation', issues: parsed.error.issues }); return; }
     const p = parsed.data;
+    if (existing.kind === 'manus-agent' && p.baseUrl && p.baseUrl.replace(/\/+$/, '') !== MANUS_API_ROOT) {
+      res.status(400).json({ error: 'validation', message: 'Manus must use its official API root.' });
+      return;
+    }
     if (p.apiKey) setProviderSecret(id, p.apiKey);
     db.prepare(`
       UPDATE providers SET
@@ -149,6 +164,7 @@ export function registerProviderRoutes(app: any): void {
     const startedAt = Date.now();
     try {
       const models = await listModelsForProvider(row, apiKey);
+      if (row.kind === 'manus-agent') await verifyManusApiKey(apiKey);
       res.json({
         ok: true,
         latencyMs: Date.now() - startedAt,
@@ -178,6 +194,9 @@ export function registerProviderRoutes(app: any): void {
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().positive().max(128_000).optional(),
       stream: z.boolean().default(true),
+      allowTerminal: z.boolean().default(false),
+      allowNetwork: z.boolean().default(false),
+      chatId: z.string().min(1).max(200).optional(),
     });
     const parsed = ChatRequest.safeParse(req.body);
     if (!parsed.success) {
@@ -185,6 +204,18 @@ export function registerProviderRoutes(app: any): void {
       return;
     }
     const body = parsed.data;
+    if (body.allowNetwork && !body.allowTerminal) {
+      res.status(400).json({ error: 'validation', message: 'Enable terminal access before granting terminal network access.' });
+      return;
+    }
+    if (body.allowTerminal && row.kind === 'manus-agent') {
+      res.status(400).json({ error: 'remote-provider', message: 'Manus runs remotely and cannot access Gnito’s local Docker sandbox. Select an OpenAI-compatible or Anthropic provider for local terminal tools.' });
+      return;
+    }
+    if (body.allowTerminal && (!body.chatId || !db.prepare('SELECT id FROM chats WHERE id=?').get(body.chatId))) {
+      res.status(400).json({ error: 'chat-required', message: 'Save this conversation before enabling terminal tools.' });
+      return;
+    }
     const apiKey = getProviderSecret(id) || '';
     if (!apiKey && row.kind !== 'custom') {
       res.status(400).json({ error: 'missing-key', message: 'Add an API key for this provider before sending a chat request.' });
@@ -202,12 +233,34 @@ export function registerProviderRoutes(app: any): void {
     };
 
     let abortController: AbortController | null = null;
+    let manusTaskId: string | null = null;
     res.on('close', () => {
-      if (!res.writableEnded && abortController) abortController.abort();
+      if (!res.writableEnded && abortController) {
+        abortController.abort();
+        if (row.kind === 'manus-agent' && manusTaskId) void stopManusTask(apiKey, manusTaskId);
+      }
     });
 
     try {
       abortController = new AbortController();
+      if (row.kind === 'manus-agent') {
+        const result = await runManusTask({
+          apiKey,
+          profile: body.model,
+          messages: body.messages,
+          signal: abortController.signal,
+          onTaskCreated: taskId => { manusTaskId = taskId; send('activity', { message: `Manus task created · ${taskId}` }); },
+          onStatus: status => send('activity', { message: `Manus status · ${status}` }),
+        });
+        if (result.taskUrl) send('activity', { message: `Manus task URL · ${result.taskUrl}` });
+        const resultText = result.taskUrl && !result.text.includes(result.taskUrl)
+          ? `${result.text}\n\n[Open Manus task](${result.taskUrl})`
+          : result.text;
+        send('chunk', { delta: resultText });
+        send('end', { status: result.status });
+        res.end();
+        return;
+      }
       const url = buildChatUrl(row);
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -216,6 +269,16 @@ export function registerProviderRoutes(app: any): void {
           : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {})),
         ...JSON.parse(row.custom_headers || '{}'),
       };
+
+      if (body.allowTerminal) {
+        const text = row.kind === 'anthropic-compatible'
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send });
+        if (text) send('chunk', { delta: text });
+        send('end', {});
+        res.end();
+        return;
+      }
 
       const resp = await fetch(url, {
         method: 'POST',
@@ -323,7 +386,277 @@ function extractStreamDelta(chunk: any, kind: string): string | null {
   return chunk?.choices?.[0]?.delta?.content ?? null;
 }
 
+async function verifyManusApiKey(apiKey: string): Promise<void> {
+  await manusJson(`${MANUS_API_ROOT}/v2/user.me`, apiKey, { method: 'GET' }, AbortSignal.timeout(10_000));
+}
+
+async function runManusTask(options: {
+  apiKey: string;
+  profile: string;
+  messages: { role: string; content: string }[];
+  signal: AbortSignal;
+  onTaskCreated: (taskId: string) => void;
+  onStatus: (status: string) => void;
+}): Promise<{ text: string; status: string; taskUrl?: string }> {
+  const profile = ['lite', 'standard', 'max'].includes(options.profile) ? options.profile : 'standard';
+  const transcript = options.messages.map(message => `${message.role.toUpperCase()}\n${message.content}`).join('\n\n').slice(-14_000);
+  const created = await manusJson(`${MANUS_API_ROOT}/v2/task.create`, options.apiKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: { content: [{ type: 'text', text: transcript, visibility: 'visible' }] },
+      agent_profile: profile,
+      share_visibility: 'private',
+    }),
+  }, options.signal);
+  const taskId = String(created?.task_id || '');
+  if (!taskId) throw new Error('Manus did not return a task ID.');
+  options.onTaskCreated(taskId);
+  const rawTaskUrl = typeof created?.task_url === 'string' ? created.task_url : '';
+  const taskUrl = safeManusTaskUrl(rawTaskUrl);
+  const deadline = Date.now() + 180_000;
+  let previousStatus = '';
+
+  while (Date.now() < deadline) {
+    await abortableDelay(2_000, options.signal);
+    const detail = await manusJson(`${MANUS_API_ROOT}/v2/task.detail?task_id=${encodeURIComponent(taskId)}`, options.apiKey, { method: 'GET' }, options.signal);
+    const task = detail?.task || {};
+    const status = String(task.status || 'unknown');
+    if (status !== previousStatus) { previousStatus = status; options.onStatus(status); }
+    if (status === 'error') {
+      const messages = await getManusTaskMessages(taskId, options.apiKey, options.signal);
+      const errorText = extractManusTaskText(messages, true);
+      throw new Error(errorText ? `Manus task failed: ${errorText.slice(0, 600)}` : 'Manus task failed.');
+    }
+    if (status === 'waiting') {
+      const messages = await getManusTaskMessages(taskId, options.apiKey, options.signal);
+      const text = extractManusTaskText(messages, false) || 'Manus is waiting for input in its remote task.';
+      return { text: `${text}\n\nManus is waiting for follow-up in its remote task${taskUrl ? `: ${taskUrl}` : ''}.`, status, taskUrl };
+    }
+    if (status === 'stopped' && task.has_running_background_jobs === false) {
+      const messages = await getManusTaskMessages(taskId, options.apiKey, options.signal);
+      return { text: extractManusTaskText(messages, false) || 'Manus task completed without a text response.', status, taskUrl };
+    }
+  }
+
+  options.onStatus('still running (Gnito polling deadline reached)');
+  return {
+    text: `Manus is still working after Gnito’s 3-minute wait. The remote task continues${taskUrl ? `; open it here: ${taskUrl}` : ` (task ${taskId})`}.`,
+    status: 'running', taskUrl,
+  };
+}
+
+async function manusJson(url: string, apiKey: string, init: RequestInit, signal: AbortSignal): Promise<any> {
+  const response = await fetch(url, {
+    ...init,
+    headers: { 'x-manus-api-key': apiKey, ...((init.headers || {}) as Record<string, string>) },
+    signal,
+  });
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(response.status, 'Manus API request');
+  }
+  const text = await response.text();
+  if (text.length > 1_000_000) throw new Error('Manus API response exceeded the 1 MB limit.');
+  try { return JSON.parse(text); }
+  catch { throw new Error('Manus API returned invalid JSON.'); }
+}
+
+async function getManusTaskMessages(taskId: string, apiKey: string, signal: AbortSignal): Promise<any[]> {
+  const query = new URLSearchParams({ task_id: taskId, order: 'desc', limit: '50' });
+  const response = await manusJson(`${MANUS_API_ROOT}/v2/task.listMessages?${query}`, apiKey, { method: 'GET' }, signal);
+  return Array.isArray(response?.messages) ? response.messages : [];
+}
+
+function extractManusTaskText(messages: any[], errorsOnly: boolean): string {
+  const selected = messages.filter(message => errorsOnly
+    ? message?.type === 'error_message'
+    : message?.type === 'assistant_message');
+  const finalMessages = errorsOnly ? selected : selected.filter(message => message?.assistant_message?.delivery_kind !== 'progress');
+  const message = finalMessages[0] || selected[0];
+  const payload = errorsOnly ? message?.error_message?.content : message?.assistant_message?.content;
+  if (typeof payload === 'string') return payload.trim().slice(0, 12_000);
+  if (Array.isArray(payload)) return payload.map(part => typeof part?.text === 'string' ? part.text : '').join('\n').trim().slice(0, 12_000);
+  return '';
+}
+
+function safeManusTaskUrl(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && (url.hostname === 'manus.im' || url.hostname.endsWith('.manus.im')) ? url.toString() : undefined;
+  } catch { return undefined; }
+}
+
+async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+    const timer = setTimeout(done, ms);
+    function done() { signal.removeEventListener('abort', abort); resolve(); }
+    function abort() { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new DOMException('Aborted', 'AbortError')); }
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function stopManusTask(apiKey: string, taskId: string): Promise<void> {
+  try {
+    await fetch(`${MANUS_API_ROOT}/v2/task.stop`, {
+      method: 'POST', headers: { 'x-manus-api-key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId }), signal: AbortSignal.timeout(5_000),
+    });
+  } catch { /* the user has already stopped the Gnito stream; do not leak secrets or block */ }
+}
+
+type AgentChatBody = { model: string; messages: { role: string; content: string }[]; temperature?: number; maxTokens?: number };
+type AgentSend = (event: string, data: unknown) => void;
+
+const TERMINAL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'terminal_run',
+    description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to run in /workspace.' },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
+        networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+};
+
+const ANTHROPIC_TERMINAL_TOOL = {
+  name: 'terminal_run',
+  description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      command: { type: 'string', description: 'Shell command to run in /workspace.' },
+      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
+      networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
+    },
+    required: ['command'],
+  },
+};
+
+const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it only when a command materially helps with the request. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask the user before destructive or irreversible operations. Never claim a command ran unless the tool result confirms it. Network access is available only if the user enabled it and the tool call sets networkAccess=true.';
+
+async function runOpenAIAgent(options: {
+  url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
+  chatId: string; allowNetwork: boolean; send: AgentSend;
+}): Promise<string> {
+  const messages: any[] = [{ role: 'system', content: TERMINAL_TOOL_POLICY }, ...options.body.messages];
+  let toolCount = 0;
+  for (let round = 0; round < 10; round++) {
+    const response = await postProviderJson(options.url, options.headers, {
+      model: options.body.model,
+      messages,
+      stream: false,
+      temperature: options.body.temperature,
+      max_tokens: options.body.maxTokens,
+      tools: [TERMINAL_TOOL],
+      tool_choice: 'auto',
+    }, options.signal);
+    const message = response?.choices?.[0]?.message;
+    if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    if (!calls.length) return providerText(message.content);
+    messages.push(message);
+    for (const call of calls) {
+      const callId = String(call.id || randomUUID());
+      let result: any;
+      try {
+        const args = typeof call.function?.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function?.arguments;
+        if (call.function?.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.function?.name || 'unknown')}`);
+        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+        toolCount++;
+        result = await runAgentTerminal(args, options);
+      } catch (error: any) {
+        result = { error: error?.message || 'The requested tool call could not be run.' };
+      }
+      messages.push({ role: 'tool', tool_call_id: callId, content: JSON.stringify(result).slice(0, 30_000) });
+    }
+  }
+  throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
+}
+
+async function runAnthropicAgent(options: {
+  url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
+  chatId: string; allowNetwork: boolean; send: AgentSend;
+}): Promise<string> {
+  const system = [TERMINAL_TOOL_POLICY, ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
+  const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content }));
+  let toolCount = 0;
+  for (let round = 0; round < 10; round++) {
+    const response = await postProviderJson(options.url, options.headers, {
+      model: options.body.model,
+      messages,
+      system,
+      max_tokens: options.body.maxTokens || 4096,
+      temperature: options.body.temperature,
+      tools: [ANTHROPIC_TERMINAL_TOOL],
+    }, options.signal);
+    const blocks = Array.isArray(response?.content) ? response.content : [];
+    const calls = blocks.filter((block: any) => block?.type === 'tool_use');
+    if (!calls.length) return blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
+    messages.push({ role: 'assistant', content: blocks });
+    const toolResults = [];
+    for (const call of calls) {
+      let result: any;
+      try {
+        if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
+        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+        toolCount++;
+        result = await runAgentTerminal(call.input, options);
+      } catch (error: any) {
+        result = { error: error?.message || 'The requested tool call could not be run.' };
+      }
+      toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(result).slice(0, 30_000), is_error: Boolean(result.error) });
+    }
+    messages.push({ role: 'user', content: toolResults });
+  }
+  throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
+}
+
+async function runAgentTerminal(input: unknown, options: {
+  signal: AbortSignal; chatId: string; allowNetwork: boolean; send: AgentSend;
+}): Promise<any> {
+  options.send('activity', { message: 'Starting an isolated Docker command requested by the model.' });
+  return executeAgentTerminal(input, {
+    chatId: options.chatId,
+    allowNetwork: options.allowNetwork,
+    signal: options.signal,
+    onEvent: event => {
+      if (event.type === 'start') options.send('activity', { message: `Running terminal command in Docker · ${String(event.command || '').slice(0, 180)}` });
+      if (event.type === 'end') options.send('activity', { message: `Terminal command ${String(event.status || 'finished')}.` });
+      const eventName = event.type === 'start' ? 'tool-start' : event.type === 'output' ? 'tool-output' : 'tool-end';
+      options.send(eventName, event);
+    },
+  });
+}
+
+async function postProviderJson(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<any> {
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
+  }
+  const text = await response.text();
+  if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+  try { return JSON.parse(text); }
+  catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+}
+
+function providerText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('');
+  return '';
+}
+
 async function listModelsForProvider(row: any, apiKey: string): Promise<ModelInfo[]> {
+  if (row.kind === 'manus-agent') return MANUS_PROFILES.map(model => ({ ...model }));
   const base = (row.base_url || '').replace(/\/+$/, '');
   if (!base) throw new Error('Provider has no base URL set.');
   const isAnthropic = row.kind === 'anthropic-compatible';
