@@ -7,7 +7,7 @@
  * SECURITY:
  *  - API keys are read from the secrets vault (server-side only), never
  *    logged, never sent to the client, never embedded in URLs.
- *  - Errors are redacted before reaching the UI.
+ *  - Upstream response bodies are never forwarded; the UI receives safe status/network summaries.
  *  - We support streaming with cancellation.
  *
  * Implementation uses fetch() (Node 20 has native fetch). For
@@ -19,16 +19,24 @@ import { z } from 'zod';
 import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
-import { redactSecrets } from '../security/redact.js';
 
 const db = getDb();
 
 // -------------------------------------------------------------- validation
 
+const ProviderBaseUrl = z.string().url().max(500).refine(value => {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}, 'Use an HTTP(S) API URL without embedded credentials, query parameters, or a fragment.');
+
 const CreateProviderInput = z.object({
   kind: z.enum(['openai-compatible', 'anthropic-compatible', 'custom']),
   label: z.string().min(1).max(100),
-  baseUrl: z.string().url().max(500),
+  baseUrl: ProviderBaseUrl,
   apiKey: z.string().min(1).max(500).optional(),
   customHeaders: z.record(z.string(), z.string()).default({}),
   enabled: z.boolean().default(true),
@@ -36,7 +44,7 @@ const CreateProviderInput = z.object({
 
 const UpdateProviderInput = z.object({
   label: z.string().min(1).max(100).optional(),
-  baseUrl: z.string().url().max(500).optional(),
+  baseUrl: ProviderBaseUrl.optional(),
   apiKey: z.string().min(1).max(500).optional(),
   customHeaders: z.record(z.string(), z.string()).optional(),
   enabled: z.boolean().optional(),
@@ -52,9 +60,8 @@ export function registerProviderRoutes(app: any): void {
       id: r.id,
       kind: r.kind,
       label: r.label,
-      baseUrl: r.baseUrl,
+      baseUrl: r.base_url,
       enabled: !!r.enabled,
-      customHeaders: JSON.parse(r.custom_headers || '{}'),
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       hasKey: !!getProviderSecret(r.id),
@@ -112,7 +119,24 @@ export function registerProviderRoutes(app: any): void {
     res.json({ ok: true });
   });
 
-  // Test connection — performs a real request, redacts errors, never echoes key.
+  // Fetch the live model list for the selected provider.
+  app.get('/api/providers/:id/models', async (req: Request, res: Response) => {
+    const row = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id) as any;
+    if (!row) { res.status(404).json({ error: 'not-found', message: 'Provider not found.' }); return; }
+    if (!row.enabled) { res.status(409).json({ error: 'provider-disabled', message: 'Enable this provider before loading its models.' }); return; }
+    const apiKey = getProviderSecret(row.id) || '';
+    if (!apiKey && row.kind !== 'custom') {
+      res.status(400).json({ error: 'missing-key', message: 'Add an API key for this provider before loading models.' });
+      return;
+    }
+    try {
+      res.json({ models: await listModelsForProvider(row, apiKey) });
+    } catch (e: any) {
+      res.status(502).json({ error: 'model-list-failed', message: safeProviderError(e, 'Model discovery') });
+    }
+  });
+
+  // Test connection — performs a real request and returns safe diagnostics without echoing secrets.
   app.post('/api/providers/:id/test', async (req: Request, res: Response) => {
     const { id } = req.params;
     const row = db.prepare('SELECT * FROM providers WHERE id = ?').get(id) as any;
@@ -133,7 +157,7 @@ export function registerProviderRoutes(app: any): void {
     } catch (e: any) {
       res.json({
         ok: false,
-        error: redactSecrets(e?.message || 'Connection failed.'),
+        error: safeProviderError(e, 'Connection test'),
       });
     }
   });
@@ -143,6 +167,7 @@ export function registerProviderRoutes(app: any): void {
     const { id } = req.params;
     const row = db.prepare('SELECT * FROM providers WHERE id = ?').get(id) as any;
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
+    if (!row.enabled) { res.status(409).json({ error: 'provider-disabled', message: 'Enable this provider before sending a chat request.' }); return; }
 
     const ChatRequest = z.object({
       model: z.string().min(1).max(200),
@@ -161,6 +186,10 @@ export function registerProviderRoutes(app: any): void {
     }
     const body = parsed.data;
     const apiKey = getProviderSecret(id) || '';
+    if (!apiKey && row.kind !== 'custom') {
+      res.status(400).json({ error: 'missing-key', message: 'Add an API key for this provider before sending a chat request.' });
+      return;
+    }
 
     // SSE streaming response.
     res.setHeader('Content-Type', 'text/event-stream');
@@ -173,8 +202,8 @@ export function registerProviderRoutes(app: any): void {
     };
 
     let abortController: AbortController | null = null;
-    req.on('close', () => {
-      if (abortController) abortController.abort();
+    res.on('close', () => {
+      if (!res.writableEnded && abortController) abortController.abort();
     });
 
     try {
@@ -184,7 +213,7 @@ export function registerProviderRoutes(app: any): void {
         'Content-Type': 'application/json',
         ...(row.kind === 'anthropic-compatible'
           ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-          : { Authorization: `Bearer ${apiKey}` }),
+          : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {})),
         ...JSON.parse(row.custom_headers || '{}'),
       };
 
@@ -213,8 +242,8 @@ export function registerProviderRoutes(app: any): void {
       });
 
       if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        send('error', { message: redactSecrets(`Provider returned ${resp.status}: ${errText.slice(0, 500)}`) });
+        void resp.body?.cancel().catch(() => {});
+        send('error', { message: safeProviderStatusError(resp.status, 'Chat request') });
         send('end', {});
         res.end();
         return;
@@ -259,7 +288,7 @@ export function registerProviderRoutes(app: any): void {
       if (e?.name === 'AbortError') {
         send('end', { cancelled: true });
       } else {
-        send('error', { message: redactSecrets(e?.message || 'Request failed') });
+        send('error', { message: safeProviderError(e, 'Chat request') });
         send('end', {});
       }
       res.end();
@@ -270,9 +299,14 @@ export function registerProviderRoutes(app: any): void {
 // ---------------------------------------------------------------- helpers
 
 function buildChatUrl(row: any): string {
-  const base = row.base_url.replace(/\/+$/, '');
-  if (row.kind === 'anthropic-compatible') return `${base}/v1/messages`;
-  return `${base}/chat/completions`; // OpenAI-compatible
+  const suffix = row.kind === 'anthropic-compatible' ? '/v1/messages' : '/chat/completions';
+  return appendEndpoint(row.base_url, suffix);
+}
+
+function appendEndpoint(baseUrl: string, endpoint: string): string {
+  const base = String(baseUrl || '').replace(/\/+$/, '');
+  const path = endpoint.startsWith('/v1/') && /\/v1$/i.test(base) ? endpoint.slice(3) : endpoint;
+  return `${base}${path}`;
 }
 
 function extractAssistantText(json: any, kind: string): string {
@@ -293,13 +327,15 @@ async function listModelsForProvider(row: any, apiKey: string): Promise<ModelInf
   const base = (row.base_url || '').replace(/\/+$/, '');
   if (!base) throw new Error('Provider has no base URL set.');
   const isAnthropic = row.kind === 'anthropic-compatible';
-  const url = isAnthropic ? `${base}/v1/models` : `${base}/models`;
+  const url = appendEndpoint(base, isAnthropic ? '/v1/models' : '/models');
   const headers: Record<string, string> = {
     ...(isAnthropic ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {})),
+    ...JSON.parse(row.custom_headers || '{}'),
   };
   const resp = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   if (!resp.ok) {
-    throw new Error(`Failed to list models (HTTP ${resp.status}).`);
+    void resp.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(resp.status, 'Model discovery');
   }
   const json = await resp.json();
   const models: ModelInfo[] = (json?.data ?? json?.models ?? []).map((m: any) => ({
@@ -308,4 +344,32 @@ async function listModelsForProvider(row: any, apiKey: string): Promise<ModelInf
     capabilities: ['text'], // Providers don't uniformly advertise capabilities; default to text.
   })).filter((m: ModelInfo) => m.id);
   return models;
+}
+
+class ProviderHttpError extends Error {
+  constructor(readonly status: number, readonly operation: string) {
+    super(`${operation} failed.`);
+    this.name = 'ProviderHttpError';
+  }
+}
+
+function safeProviderStatusError(status: number, operation: string): string {
+  const detail = status === 401 || status === 403 ? 'authentication was rejected'
+    : status === 404 ? 'the endpoint was not found'
+    : status === 429 ? 'the provider rate limit was reached'
+    : status === 400 ? 'the request was rejected; check the model ID and request settings'
+    : status >= 500 ? 'the provider returned a server error'
+    : 'the provider rejected the request';
+  return `${operation} failed (HTTP ${status}: ${detail}).`;
+}
+
+function safeProviderError(error: unknown, operation: string): string {
+  if (error instanceof ProviderHttpError) return safeProviderStatusError(error.status, operation);
+  const err = error as { name?: string; code?: string; cause?: { code?: string } } | null;
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return `${operation} timed out.`;
+  if (err?.name === 'SyntaxError') return `${operation} returned invalid JSON.`;
+  const code = err?.cause?.code || err?.code;
+  const safeCodes = new Set(['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'EHOSTUNREACH', 'CERT_HAS_EXPIRED', 'SELF_SIGNED_CERT_IN_CHAIN']);
+  if (code && safeCodes.has(code)) return `${operation} could not connect to the provider (${code}). Check the base URL and network.`;
+  return `${operation} failed. Check the provider base URL, credentials, and network connection.`;
 }

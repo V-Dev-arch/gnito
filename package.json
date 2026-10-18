@@ -39,6 +39,7 @@
     "react-markdown": "9.1.0",
     "rehype-highlight": "7.0.2",
     "remark-gfm": "4.0.1",
+    "simple-icons": "^16.35.0",
     "ua-parser-js": "1.0.41",
     "wouter": "3.13.0",
     "zod": "3.23.8",

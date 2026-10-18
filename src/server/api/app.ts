@@ -57,6 +57,15 @@ export function createApp(): Express {
   // --- authenticated routes ---
   app.use('/api', requireSession);
 
+  app.get('/api/health', (_req: Request, res: Response) => {
+    try {
+      getDb().prepare('SELECT 1').get();
+      res.json({ status: 'ok', uptimeSec: Math.floor(process.uptime()) });
+    } catch {
+      res.status(503).json({ status: 'unavailable' });
+    }
+  });
+
   registerChatRoutes(app);
   registerMemoryRoutes(app);
   registerProjectRoutes(app);

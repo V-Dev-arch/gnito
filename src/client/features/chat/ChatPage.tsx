@@ -1,53 +1,104 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { Send, Square, Copy, Plus, RefreshCw } from 'lucide-react';
-import { api } from '../../lib/api';
-import { useToast } from '../../lib/toast';
+import { Copy, Plus, RefreshCw, Send, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { ModelInfo } from '../../../shared/types.js';
+import { PROVIDER_PRESETS, type ProviderPreset } from '../../../shared/providerPresets.js';
+import { api } from '../../lib/api.js';
+import { useToast } from '../../lib/toast.js';
+import { ProviderLogo } from '../../ui/ProviderLogo.js';
 
-interface Provider {
-  id: string; label: string; baseUrl: string; enabled: boolean; kind: string; hasKey: boolean;
-}
-interface Message { id: string; role: 'user' | 'assistant'; content: string; createdAt?: number }
+interface Provider { id: string; label: string; baseUrl: string; enabled: boolean; kind: string; hasKey: boolean }
+interface Message { id: string; role: 'user' | 'assistant'; content: string; createdAt?: number; providerId?: string; modelId?: string }
 interface Chat { id: string; title: string; projectId: string | null; status: string }
-
 interface Props { chatId?: string; projectId?: string }
+interface MemoryEntry { key: string; value: string }
+
+function providerMark(provider?: Provider): ProviderPreset {
+  const matching = PROVIDER_PRESETS.find(p => provider && (provider.baseUrl.replace(/\/$/, '') === p.baseUrl.replace(/\/$/, '') || provider.label.toLowerCase().includes(p.label.toLowerCase())));
+  return matching || { id: 'custom', label: provider?.label || 'Provider', kind: 'openai-compatible', baseUrl: provider?.baseUrl || '', color: '#7b7f8c', logo: 'custom' };
+}
 
 export function ChatPage({ chatId, projectId }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<string>('');
-  const [selectedModel, setSelectedModel] = useState<string>('');
+  const [selectedProvider, setSelectedProvider] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [manualModel, setManualModel] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [streamedText, setStreamedText] = useState('');
+  const [activity, setActivity] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [chatInfo, setChatInfo] = useState<Chat | null>(null);
+  const [activeChatId, setActiveChatId] = useState(chatId || '');
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { push } = useToast();
   const [, setLocation] = useLocation();
+  const enabledProviders = providers.filter(p => p.enabled);
+  const chosenProvider = providers.find(p => p.id === selectedProvider);
+  const activeModel = selectedModel || manualModel.trim();
 
-  // Load providers.
   useEffect(() => {
+    let alive = true;
     api.get('/api/providers').then((ps: Provider[]) => {
-      const enabled = ps.filter(p => p.enabled);
+      if (!alive) return;
       setProviders(ps);
-      if (enabled.length > 0) setSelectedProvider(enabled[0].id);
-    }).catch(e => setError(e.message));
+      const enabled = ps.filter(p => p.enabled);
+      if (!selectedProvider && enabled.length) setSelectedProvider(enabled[0].id);
+    }).catch((e: Error) => { if (alive) setError(`Could not load providers: ${e.message}`); });
+    return () => { alive = false; };
   }, []);
 
-  // Load chat.
   useEffect(() => {
-    if (!chatId) return;
+    let alive = true;
+    if (!selectedProvider) { setModels([]); setSelectedModel(''); return; }
+    setModels([]);
+    setModelsError(null);
+    setModelsLoading(true);
+    api.get(`/api/providers/${selectedProvider}/models`).then((r: { models: ModelInfo[] }) => {
+      if (!alive) return;
+      const available = r.models || [];
+      setModels(available);
+      setSelectedModel(current => available.some(m => m.id === current) ? current : (available[0]?.id || ''));
+      setManualModel('');
+    }).catch((e: Error) => {
+      if (alive) { setModelsError(e.message); setSelectedModel(''); }
+    }).finally(() => { if (alive) setModelsLoading(false); });
+    return () => { alive = false; };
+  }, [selectedProvider]);
+
+  useEffect(() => {
+    let alive = true;
+    setActiveChatId(chatId || '');
+    if (!chatId) { setMessages([]); setChatInfo(null); return; }
+    setMessages([]);
     api.get(`/api/chats/${chatId}`).then((r: any) => {
+      if (!alive) return;
       setChatInfo(r.chat);
-      setMessages(r.messages.filter((m: any) => m.role === 'user' || m.role === 'assistant'));
-    }).catch(e => setError(e.message));
+      setMessages(r.messages.filter((m: Message) => m.role === 'user' || m.role === 'assistant'));
+    }).catch((e: Error) => { if (alive) setError(`Could not load this chat: ${e.message}`); });
+    return () => { alive = false; };
   }, [chatId]);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, streamedText]);
+  useEffect(() => {
+    let alive = true;
+    api.get('/api/memory/enabled').then(async ({ enabled }: { enabled: boolean }) => {
+      if (!enabled) return;
+      const entries = await api.get('/api/memory');
+      if (alive) setMemoryEntries(entries as MemoryEntry[]);
+    }).catch(() => { /* Memory is optional and remains off if unavailable. */ });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, streamedText, activity]);
 
   const createChat = async (): Promise<string> => {
     const r = await api.post('/api/chats', { title: 'New chat', projectId: projectId ?? null });
@@ -56,232 +107,170 @@ export function ChatPage({ chatId, projectId }: Props) {
 
   const send = useCallback(async () => {
     const content = input.trim();
-    if (!content || streaming) return;
-    if (!selectedProvider) { push('Add a provider in Settings first.', 'error'); return; }
-    if (!selectedModel) { push('Select a model.', 'error'); return; }
+    if (!content || streaming || saving) return;
+    if (!selectedProvider) { setError('Choose an enabled provider or add one in Settings.'); return; }
+    if (!activeModel) { setError(modelsError ? `${modelsError} You can enter a model ID manually below.` : 'Select a model before sending.'); return; }
 
     let cid = chatId;
+    let createdHere = false;
     if (!cid) {
-      try { cid = await createChat(); setLocation(`/chats/${cid}`); } catch (e: any) { setError(e.message); return; }
+      try { cid = await createChat(); createdHere = true; setActiveChatId(cid); }
+      catch (e: any) { setError(`Could not create chat: ${e.message}`); return; }
     }
 
-    const userMsg: Message = { id: `tmp-${Date.now()}`, role: 'user', content };
-    setMessages(m => [...m, userMsg]);
-    setInput('');
-    setStreaming(true);
-    setStreamedText('');
     setError(null);
+    setStreaming(true);
+    setSaving(true);
+    setActivity('Saving your message…');
+    setStreamedText('');
+    const optimisticUser: Message = { id: `u-${Date.now()}`, role: 'user', content, providerId: selectedProvider, modelId: activeModel };
+    setMessages(current => [...current, optimisticUser]);
+    setInput('');
+    try {
+      await api.post(`/api/chats/${cid}/messages`, { role: 'user', content, providerId: selectedProvider, modelId: activeModel });
+    } catch (e: any) {
+      setMessages(current => current.filter(m => m.id !== optimisticUser.id));
+      setInput(content);
+      setStreaming(false);
+      setSaving(false);
+      setActivity('');
+      setError(`Your message was not saved, so it was not sent to the provider. ${e.message}`);
+      return;
+    }
+    setSaving(false);
 
-    // Save user message to backend.
-    api.post(`/api/chats/${cid}/messages`, { role: 'user', content }).catch(() => {});
-
-    // Stream response. The api client passes the authoritative final text.
+    const title = content.replace(/\s+/g, ' ').slice(0, 64);
+    if (!messages.length && cid) {
+      try {
+        await api.patch(`/api/chats/${cid}`, { title });
+        setChatInfo({ id: cid, title, projectId: projectId ?? null, status: 'active' });
+      } catch (e: any) { setError(`Chat saved, but its title could not be updated: ${e.message}`); }
+    }
+    const memoryPrompt = memoryEntries.length
+      ? `User-approved local memory (use only when relevant; do not expose or rewrite these entries):\n${memoryEntries.map(entry => `- ${entry.key}: ${entry.value}`).join('\n')}`
+      : '';
     const priorMessages = messages.map(m => ({ role: m.role, content: m.content }));
+    const requestMessages = [
+      ...(memoryPrompt ? [{ role: 'system', content: memoryPrompt }] : []),
+      ...priorMessages,
+      { role: 'user', content },
+    ];
+    setActivity(`Connecting to ${chosenProvider?.label || 'provider'} · ${activeModel}…`);
     abortRef.current = api.streamChat(
       selectedProvider,
-      {
-        model: selectedModel,
-        messages: [...priorMessages, { role: 'user', content }],
-        stream: true,
+      { model: activeModel, messages: requestMessages, stream: true },
+      delta => {
+        setActivity(`Generating with ${chosenProvider?.label || 'provider'} · ${activeModel}`);
+        setStreamedText(text => text + delta);
       },
-      (delta) => setStreamedText(t => t + delta),
-      (finalText: string) => {
+      finalText => {
         setStreaming(false);
-        if (finalText) {
-          const assistantMsg: Message = { id: `a-${Date.now()}`, role: 'assistant', content: finalText };
-          setMessages(m => [...m, assistantMsg]);
-          if (cid) api.post(`/api/chats/${cid}/messages`, { role: 'assistant', content: finalText }).catch(() => {});
+        setActivity('');
+        if (!finalText) {
+          setError('The provider ended the response without text. Check the model and provider API response.');
+          setStreamedText('');
+          return;
         }
+        const assistantMsg: Message = { id: `a-${Date.now()}`, role: 'assistant', content: finalText, providerId: selectedProvider, modelId: activeModel };
+        setMessages(current => [...current, assistantMsg]);
         setStreamedText('');
+        api.post(`/api/chats/${cid}/messages`, { role: 'assistant', content: finalText, providerId: selectedProvider, modelId: activeModel })
+          .then(() => { if (createdHere) setLocation(`/chats/${cid}`); })
+          .catch((e: Error) => setError(`The response arrived but could not be saved to this chat. ${e.message}`));
       },
-      (msg) => {
+      message => {
         setStreaming(false);
-        setError(msg);
+        setActivity('');
+        setError(message);
       },
     );
-  }, [input, streaming, selectedProvider, selectedModel, chatId, messages, projectId]);
+  }, [input, streaming, saving, selectedProvider, activeModel, modelsError, chatId, messages, projectId, setLocation, chosenProvider, memoryEntries]);
 
   const stop = () => {
     abortRef.current?.abort();
     setStreaming(false);
-    setStreamedText(t => {
-      if (t) {
-        const assistantMsg: Message = { id: `a-${Date.now()}`, role: 'assistant', content: t + '\n\n_[stopped]_' };
-        setMessages(m => [...m, assistantMsg]);
+    setActivity('Generation stopped by you.');
+    if (streamedText) {
+      const content = `${streamedText}\n\n_[Generation stopped]_`;
+      const partial: Message = { id: `a-${Date.now()}`, role: 'assistant', content, providerId: selectedProvider, modelId: activeModel };
+      setMessages(current => [...current, partial]);
+      if (activeChatId) {
+        api.post(`/api/chats/${activeChatId}/messages`, { role: 'assistant', content, providerId: selectedProvider, modelId: activeModel })
+          .catch((e: Error) => setError(`Partial response could not be saved. ${e.message}`));
       }
-      return '';
-    });
+    }
+    setStreamedText('');
   };
 
-  const enabledProviders = providers.filter(p => p.enabled);
   const needsSetup = enabledProviders.length === 0;
+  const selectedMark = providerMark(chosenProvider);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
+    <div className="chat-page">
       <div className="chat-container">
         <div className="chat-header">
           <div>
             <h1 className="chat-title" data-testid="text-chat-title">{chatInfo?.title || 'New chat'}</h1>
-            <div className="composer-meta">
-              <span>{enabledProviders.length} provider{enabledProviders.length === 1 ? '' : 's'} · local-first</span>
+            <div className="chat-header-caption">
+              {chosenProvider ? <><ProviderLogo preset={selectedMark} size={16} /><span>{chosenProvider.label}</span><span className="caption-dot">·</span><span>{activeModel || 'Choose a model'}</span></> : <span>{enabledProviders.length} connected providers</span>}
+              {memoryEntries.length > 0 && <><span className="caption-dot">·</span><span>Memory on</span></>}
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Link href="/" className="btn btn-ghost btn-sm" data-testid="button-new-chat">
-              <Plus size={14} /> New chat
-            </Link>
-          </div>
+          <Link href="/" className="btn btn-secondary btn-sm" data-testid="button-new-chat"><Plus size={15} /> New chat</Link>
         </div>
 
-        {needsSetup && !streaming && (
-          <div className="card" style={{ marginBottom: 16 }} data-testid="setup-card">
-            <div className="card-title">Welcome to Gnito</div>
-            <div className="card-description">
-              Gnito is a local-first AI workspace. Add a model provider (bring your own API key) to start chatting.
-              Your data stays on this machine.
-            </div>
-            <Link href="/settings" className="btn btn-primary" data-testid="button-setup-provider">Add a provider</Link>
-          </div>
-        )}
+        {needsSetup && <div className="card" style={{ marginBottom: 16 }} data-testid="setup-card">
+          <div className="card-title">Connect a model provider</div>
+          <div className="card-description">Gnito connects directly to your provider using your own API key. Keys are encrypted locally and are never sent to the browser.</div>
+          <Link href="/settings" className="btn btn-primary" data-testid="button-setup-provider">Add a provider</Link>
+        </div>}
 
-        {messages.length === 0 && !streaming && !needsSetup && (
-          <div className="empty-state">
-            <img src="/brand/logo-mono.svg" alt="" width={48} height={48} style={{ color: 'var(--color-primary)' }} />
-            <div className="empty-state-title">How can Gnito help?</div>
-            <div className="empty-state-text">Ask anything. Gnito will use your chosen model and save the conversation locally.</div>
-            <div className="empty-state-actions">
-              {[
-                { title: 'Explain a concept', desc: 'Get a clear explanation of any topic' },
-                { title: 'Summarize a file', desc: 'Pick an approved folder and summarize a file' },
-                { title: 'Search the web', desc: 'Find current information from the web' },
-                { title: 'Create an automation', desc: 'Schedule a recurring task' },
-              ].map(s => (
-                <button
-                  key={s.title}
-                  className="suggestion-card"
-                  onClick={() => setInput(s.title)}
-                  data-testid={`suggestion-${s.title.toLowerCase().replace(/\s+/g, '-')}`}
-                >
-                  <div className="suggestion-title">{s.title}</div>
-                  <div className="suggestion-desc">{s.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        {messages.length === 0 && !needsSetup && <div className="empty-state">
+          <img src="/brand/logo-mono.svg" alt="" width={44} height={44} />
+          <div className="empty-state-title">What would you like to work on?</div>
+          <div className="empty-state-text">Your conversations stay in your local workspace. Choose a provider and model below.</div>
+          <div className="empty-state-actions">{[
+            { title: 'Explain a concept', desc: 'Get a clear explanation, at any level' },
+            { title: 'Summarize a file', desc: 'Work with files in folders you have approved' },
+            { title: 'Search the web', desc: 'Ask for current information and sources' },
+            { title: 'Create an automation', desc: 'Plan a recurring task for Automation Center' },
+          ].map(s => <button key={s.title} className="suggestion-card" onClick={() => setInput(s.title)}><span className="suggestion-title">{s.title}</span><span className="suggestion-desc">{s.desc}</span></button>)}</div>
+        </div>}
 
         <div className="chat-messages" data-testid="chat-messages">
-          {messages.map(m => (
-            <div key={m.id} className={`message ${m.role}`} data-testid={`message-${m.id}`}>
-              <div className="message-role">
-                {m.role === 'user' ? 'You' : 'Gnito'}
-              </div>
-              <div className="message-content markdown">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-              </div>
-              <div className="message-actions">
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => { navigator.clipboard.writeText(m.content); push('Copied', 'success'); }}
-                  aria-label="Copy message"
-                  data-testid={`button-copy-${m.id}`}
-                >
-                  <Copy size={12} /> Copy
-                </button>
-                {m.role === 'user' && (
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => setInput(m.content)}
-                    aria-label="Edit and resend"
-                    data-testid={`button-edit-${m.id}`}
-                  >
-                    <RefreshCw size={12} /> Edit
-                  </button>
-                )}
-              </div>
+          {messages.map(m => <div key={m.id} className={`message ${m.role}`} data-testid={`message-${m.id}`}>
+            <div className="message-role">{m.role === 'user' ? 'You' : 'Gnito'}{m.role === 'assistant' && m.modelId ? <span className="message-model">{m.modelId}</span> : null}</div>
+            <div className="message-content markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown></div>
+            <div className="message-actions">
+              <button className="btn btn-ghost btn-sm" onClick={() => { navigator.clipboard.writeText(m.content); push('Copied to clipboard.', 'success'); }} aria-label="Copy message"><Copy size={12} /> Copy</button>
+              {m.role === 'user' && <button className="btn btn-ghost btn-sm" onClick={() => setInput(m.content)} aria-label="Edit and resend"><RefreshCw size={12} /> Edit</button>}
             </div>
-          ))}
-
-          {streaming && (
-            <div className="message assistant" data-testid="message-streaming">
-              <div className="message-role">Gnito</div>
-              <div className="message-content markdown">
-                {streamedText ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamedText}</ReactMarkdown> : (
-                  <div className="streaming-indicator">
-                    <div className="dots"><span className="dot" /><span className="dot" /><span className="dot" /></div>
-                    <span>Generating…</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <div className="card" style={{ borderColor: 'var(--color-error)' }} data-testid="chat-error">
-              <div className="card-title" style={{ color: 'var(--color-error)' }}>Request failed</div>
-              <div className="card-description">{error}</div>
-              <button className="btn btn-secondary" onClick={() => setError(null)}>Dismiss</button>
-            </div>
-          )}
-
+          </div>)}
+          {streaming && <div className="message assistant" data-testid="message-streaming">
+            <div className="message-role">Gnito <span className="message-model">{activity || 'Connecting…'}</span></div>
+            <div className="message-content markdown">{streamedText ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamedText}</ReactMarkdown> : <div className="streaming-indicator"><div className="dots"><span className="dot" /><span className="dot" /><span className="dot" /></div><span>{activity || 'Waiting for provider response…'}</span></div>}</div>
+          </div>}
+          {error && <div className="request-error" role="alert" data-testid="chat-error"><div><strong>Request failed</strong><p>{error}</p></div><button className="btn btn-ghost btn-sm" onClick={() => setError(null)}>Dismiss</button></div>}
           <div ref={messagesEndRef} />
         </div>
       </div>
 
-      <div className="composer">
-        <div className="composer-inner">
-          <div className="composer-input-row">
-            <textarea
-              className="composer-textarea"
-              placeholder="Ask Gnito…"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-              }}
-              aria-label="Chat message"
-              data-testid="input-chat-message"
-              rows={1}
-            />
-            {streaming ? (
-              <button className="composer-send stop" onClick={stop} data-testid="button-stop">
-                <Square size={14} /> Stop
-              </button>
-            ) : (
-              <button className="composer-send" onClick={send} disabled={!input.trim()} data-testid="button-send">
-                <Send size={14} /> Send
-              </button>
-            )}
-          </div>
-          <div className="composer-actions">
-            <div className="composer-model-selector">
-              <select
-                className="select"
-                value={selectedProvider}
-                onChange={e => setSelectedProvider(e.target.value)}
-                aria-label="Provider"
-                style={{ minHeight: 32, fontSize: 12 }}
-                data-testid="select-provider"
-              >
-                <option value="">— Provider —</option>
-                {enabledProviders.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-              </select>
-              <input
-                className="input"
-                placeholder="model id"
-                value={selectedModel}
-                onChange={e => setSelectedModel(e.target.value)}
-                aria-label="Model"
-                style={{ minHeight: 32, fontSize: 12, maxWidth: 220, minWidth: 120 }}
-                data-testid="input-model"
-              />
-            </div>
-            <div className="composer-meta">
-              <span>Enter to send · Shift+Enter for newline</span>
-            </div>
-          </div>
+      <div className="composer"><div className="composer-inner">
+        <div className="composer-input-row">
+          <textarea className="composer-textarea" placeholder="Message Gnito…" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} aria-label="Chat message" data-testid="input-chat-message" rows={1} />
+          {streaming ? <button className="composer-send stop" onClick={stop} data-testid="button-stop"><Square size={14} /> Stop</button> : <button className="composer-send" onClick={send} disabled={!input.trim() || saving || !activeModel} data-testid="button-send"><Send size={14} /> {saving ? 'Saving…' : 'Send'}</button>}
         </div>
-      </div>
+        <div className="composer-actions">
+          <div className="composer-model-selector">
+            <select className="select" value={selectedProvider} onChange={e => setSelectedProvider(e.target.value)} aria-label="Provider" data-testid="select-provider">
+              <option value="">Choose provider</option>{enabledProviders.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+            {models.length > 0 ? <select className="select" value={selectedModel} onChange={e => setSelectedModel(e.target.value)} aria-label="Model" data-testid="select-model">{models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input className="input model-fallback" value={manualModel} onChange={e => setManualModel(e.target.value)} placeholder={modelsLoading ? 'Loading models…' : 'Model ID'} aria-label="Model ID" data-testid="input-model" disabled={modelsLoading} />}
+            {modelsLoading && <span className="model-loading" role="status">Loading models</span>}
+          </div>
+          <div className="composer-meta"><span>{modelsError ? `Model discovery: ${modelsError}` : 'Enter to send · Shift+Enter for a new line'}</span></div>
+        </div>
+      </div></div>
     </div>
   );
 }

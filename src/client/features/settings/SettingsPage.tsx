@@ -1,10 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock } from 'lucide-react';
+import { CUSTOM_PROVIDER_PRESET, MANUS_PROVIDER_NOTICE, PROVIDER_PRESETS, type ProviderPreset } from '../../../shared/providerPresets';
 import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
+import { ProviderLogo } from '../../ui/ProviderLogo';
 
 interface Provider {
   id: string; kind: string; label: string; baseUrl: string; enabled: boolean; hasKey: boolean;
+}
+
+function providerPresetFor(provider: Provider): ProviderPreset {
+  return PROVIDER_PRESETS.find(p => provider.baseUrl.replace(/\/$/, '').startsWith(p.baseUrl.replace(/\/$/, '')))
+    || { ...CUSTOM_PROVIDER_PRESET, label: provider.label, baseUrl: provider.baseUrl };
 }
 
 const SECTIONS = [
@@ -23,7 +30,8 @@ export function SettingsPage() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [diagnostics, setDiagnostics] = useState<any>(null);
-  const [newProvider, setNewProvider] = useState({ label: '', baseUrl: '', apiKey: '', kind: 'openai-compatible' });
+  const [presetId, setPresetId] = useState('openai');
+  const [newProvider, setNewProvider] = useState({ label: PROVIDER_PRESETS[0].label, baseUrl: PROVIDER_PRESETS[0].baseUrl, apiKey: '', kind: PROVIDER_PRESETS[0].kind as string });
   const [backupPassword, setBackupPassword] = useState('');
   const [backups, setBackups] = useState<any[]>([]);
   const [restoreInfo, setRestoreInfo] = useState({ path: '', password: '' });
@@ -43,9 +51,11 @@ export function SettingsPage() {
   const addProvider = async () => {
     if (!newProvider.label || !newProvider.baseUrl) { push('Label and base URL are required.', 'error'); return; }
     try {
-      await api.post('/api/providers', newProvider);
+      const { apiKey, ...providerInput } = newProvider;
+      await api.post('/api/providers', { ...providerInput, ...(apiKey ? { apiKey } : {}) });
       push('Provider added. Key stored encrypted locally.', 'success');
-      setNewProvider({ label: '', baseUrl: '', apiKey: '', kind: 'openai-compatible' });
+      setPresetId('openai');
+      setNewProvider({ label: PROVIDER_PRESETS[0].label, baseUrl: PROVIDER_PRESETS[0].baseUrl, apiKey: '', kind: PROVIDER_PRESETS[0].kind });
       load();
     } catch (e: any) { push(e.message, 'error'); }
   };
@@ -133,14 +143,21 @@ export function SettingsPage() {
               <div className="card-title">Add a provider</div>
               <div className="card-description">
                 Bring your own key. Costs, quotas, and data policies depend on the provider.
-                Keys are stored encrypted in your local Gnito data dir and never leave your machine except to call the provider.
+                Keys are stored encrypted in your local Gnito data dir and never leave your machine except to call the provider. Manus uses an asynchronous Responses/Tasks API and is not a chat-completions provider here yet.
               </div>
               <div className="field-row">
                 <div className="field">
-                  <label className="label" htmlFor="sp-kind">Type</label>
-                  <select id="sp-kind" className="select" value={newProvider.kind} onChange={e => setNewProvider({ ...newProvider, kind: e.target.value })} data-testid="select-provider-kind">
-                    <option value="openai-compatible">OpenAI-compatible</option>
-                    <option value="anthropic-compatible">Anthropic-compatible</option>
+                  <label className="label" htmlFor="sp-preset">Provider</label>
+                  <select id="sp-preset" className="select" value={presetId} onChange={e => {
+                    const value = e.target.value;
+                    setPresetId(value);
+                    const preset = PROVIDER_PRESETS.find(p => p.id === value);
+                    if (preset) setNewProvider(current => ({ ...current, label: preset.label, baseUrl: preset.baseUrl, kind: preset.kind }));
+                    else setNewProvider(current => ({ ...current, label: '', baseUrl: '', kind: 'custom' }));
+                  }} data-testid="select-provider-kind">
+                    {PROVIDER_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    <option value="custom">Custom OpenAI-compatible</option>
+                    <option value="manus" disabled>Manus API — not compatible yet</option>
                   </select>
                 </div>
                 <div className="field">
@@ -150,8 +167,9 @@ export function SettingsPage() {
               </div>
               <div className="field">
                 <label className="label" htmlFor="sp-url">Base URL</label>
-                <input id="sp-url" className="input" value={newProvider.baseUrl} onChange={e => setNewProvider({ ...newProvider, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" data-testid="input-provider-url" />
+                <input id="sp-url" className="input" value={newProvider.baseUrl} onChange={e => setNewProvider({ ...newProvider, baseUrl: e.target.value })} placeholder="https://your-provider.example/v1" readOnly={presetId !== 'custom'} data-testid="input-provider-url" />
               </div>
+              <div className="provider-note">{presetId === 'custom' ? 'Use the API root for an OpenAI-compatible endpoint. Model discovery uses its /models route.' : `Preset includes the provider API root. Add your own key; ${MANUS_PROVIDER_NOTICE}`}</div>
               <div className="field">
                 <label className="label" htmlFor="sp-key">API key (stored encrypted, never shown again)</label>
                 <input id="sp-key" type="password" className="input" value={newProvider.apiKey} onChange={e => setNewProvider({ ...newProvider, apiKey: e.target.value })} placeholder="sk-…" data-testid="input-provider-key" />
@@ -161,7 +179,7 @@ export function SettingsPage() {
 
             {providers.map(p => (
               <div key={p.id} className="card" style={{ marginBottom: 12 }} data-testid={`provider-${p.id}`}>
-                <div className="card-title">{p.label} <span style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)', fontWeight: 400 }}>{p.kind}</span></div>
+                <div className="provider-card-title"><ProviderLogo preset={providerPresetFor(p)} size={22} /><div className="card-title">{p.label} <span style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)', fontWeight: 400 }}>{p.kind}</span></div></div>
                 <div className="card-description">{p.baseUrl}</div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button className="btn btn-secondary btn-sm" onClick={() => testProvider(p.id)} data-testid={`button-test-${p.id}`}>Test connection</button>

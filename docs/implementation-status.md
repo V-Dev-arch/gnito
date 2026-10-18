@@ -1,69 +1,44 @@
 # Gnito — Implementation Status
 
-Honest report of what is complete vs. partial vs. not implemented.
-Run `npm run typecheck && npm run test && npm run build` to reproduce the
-checks yourself.
+Honest report of what is complete vs. partial vs. not implemented. Run `npm run typecheck && npm run lint && npm test && npm run build` to reproduce the current validation checks.
 
-## ✅ Implemented and verified
+## Implemented and verified
 
 | Feature | How verified |
 |---|---|
-| Local backend (Express, loopback) | Boots, serves dist/client + /api from one origin; `npm start` works after `npm run build` |
+| Local backend (Express, loopback) | Boots, serves `dist/client` and `/api` from one origin; `npm start` works after `npm run build` |
 | SQLite persistence + migrations | `better-sqlite3`, WAL, versioned `_migrations` table |
-| Session + CSRF + rate-limit | Unit tests; live curl tests (401 without session, 403 with bad Host, CSRF header enforced) |
-| Host/Origin allowlist (loopback only) | Live curl: `Host: evil.com` → 403; no-Origin curl → allowed |
-| Secrets vault (encrypted at rest) | Integration test: set/get/delete round-trip |
-| Provider CRUD + connection test | Live curl round-trip (create, list, patch, delete, test endpoint); `baseUrl`/`base_url` mapping fixed |
-| Streaming chat with cancel | `streamChat` returns `AbortController` synchronously; authoritative final text accumulated in the stream loop, not a React ref |
-| Chats / messages / search | Live curl round-trip |
-| Projects + per-project instructions | Live curl round-trip |
-| Memory (opt-in) | Off by default; Incognito writes rejected via `X-Gnito-Incognito` header check in the route |
-| Incognito Mode | In-memory map only; never touches `chats`/`messages` tables; temp files deleted on exit |
-| File grants (least-privilege) | Live curl: `..` traversal rejected, existing-symlink escape rejected; write/delete requires the grant's specific `files:write`/`files:delete` permission |
-| Tool registry + permission gates | Live curl: `files_write` create → approve → execute round-trip; approval binds to the exact stored input (request-body args ignored) |
-| Terminal allowlist | Live curl: `ls` not in allowlist → rejected without spawning a process; `spawn` uses `shell:false` + args array |
-| Automation Center | Live curl: create, activate, pause, run-now, duplicate, delete; occurrence-key UNIQUE index prevents duplicate runs; **verified the missing-placeholder SQL bug is fixed** (12 columns, 12 placeholders) |
-| Scheduler (backend) | `node-cron` for recurring, `setTimeout` for one-shot; missed-run policies applied on boot; no fabricated `next_run_at` for recurring |
-| Plugin manifests | zod-validated; install/enable/disable/uninstall lifecycle |
-| Encrypted backup + restore | Unit tests: wrong password rejected, tampered ciphertext rejected, truncated archive rejected. Restore is transactional, remaps project IDs for chats, and does not overwrite without opt-in |
-| Design system (dark + light) | Tokens in `tokens.css`, both themes; live browser screenshots (desktop + mobile) |
-| Logo / wordmark / favicon | Original SVG marks under `public/brand/` |
-| Command palette (Ctrl/Cmd+K) | Rendered; keyboard navigable; aria labels |
-| Tests | 21 passing (`vitest run`) |
-| Production build | `npm run build` bundles client (Vite) + server (esbuild); verified `npm start` boots and serves |
+| Session + CSRF + rate limit | Unit tests; live curl checks for session, CSRF header, and trusted-host enforcement |
+| Secrets vault | Integration test: set/get/delete round-trip; provider keys are stored server-side |
+| Provider setup + model discovery | Mock OpenAI-compatible provider round-trip; keyless custom endpoints are supported; preset-provider chat requires a saved key; arbitrary upstream bodies and custom headers are not returned to the client |
+| Streaming chat + cancellation | Live mock-provider stream; final response is accumulated in the stream loop and normal completion does not abort the request |
+| Chats / messages / search | Local persistence and reload verified with a mock provider |
+| Incognito Mode | Provider streaming into an owner-bound in-memory session; no `chats`/`messages` writes; 30-minute idle and 12-hour maximum expiry; per-session and total session bounds; temporary files deleted on exit/expiry |
+| Projects + per-project instructions | Existing API routes and local database support |
+| Memory (opt-in) | Off by default; normal memory APIs are separate from Incognito sessions |
+| File grants (least-privilege) | Existing path checks reject traversal and symlink escapes; write/delete require matching grant permissions |
+| Tool registry + permission gates | Existing approval binds execution to exact stored input |
+| Terminal allowlist | Existing command runner uses `shell:false` and an allowlist |
+| Automation Center + scheduler | Existing APIs and scheduler support scheduled and one-shot jobs; see limitations below for model tool chaining |
+| Plugin manifests | zod-validated install/enable/disable/uninstall lifecycle |
+| Encrypted backup + restore | Existing tests cover wrong password, tampering and truncation; restore is transactional |
+| Design system + brand | Dark/light tokens, updated SVG mark/wordmark/favicon; desktop browser smoke test and phone-width layout screenshot |
+| Tests + build | TypeScript, strict lint, 24 tests, production client/server build; provider stream and saved-chat reload smoke-tested locally |
 
-## ⚠️ Partial / with disclosed limitations
+## Partial / not implemented
 
 | Feature | Limitation |
 |---|---|
-| Agent loop (multi-step tool calling) | Tool registry + approval flow are real; there is no automatic multi-step reasoning loop. Automations call the provider once with `taskInstruction` (no tool-chaining). |
-| Incognito model streaming | Incognito stores messages in memory but does not call a provider in this build (the UI shows a clear disclosure, not a fake response). |
-| Plugin code execution | Plugins install + register manifests, but nothing currently loads/invokes their `index.js`. There is no global `gnito` SDK object yet. |
-| Backup of user files | Not included in v1 backups; re-grant folders after restore. |
-| Web search backend | DuckDuckGo HTML as default; self-hosted SearXNG recommended for production. |
-| Terminal sandboxing | Host execution only, gated by allowlist. No container isolation in this iteration. |
-| Enter-to-send setting | Saves to settings but is not yet read by the composer (composer always uses Enter-to-send). |
-| Audio / voice | Settings toggle exists; no real microphone / TTS pipeline. |
-| MCP connector | Manifest field defined; no MCP client. |
-| Git / GitHub connectors | Permission slugs defined; no connector. |
-| Browser E2E tests | None written (manual Playwright visual QA performed on desktop + mobile). |
-
-## Not implemented (planned)
-
-- Full agent loop with tool-calling (multi-turn reasoning).
-- MCP client adapter.
-- Git/GitHub tool adapters.
-- Audio: mic input, STT, TTS, playback.
-- Plugin process isolation (worker_threads + permission broker).
-- Plugin tool loading (invoking plugin `index.js` exports).
-- User-file backup inclusion.
-- Automated browser tests (Playwright test suite).
-
-## How to verify
-
-```bash
-npm run typecheck   # tsc for both client and server
- npm run test        # vitest (21 tests)
-npm run build       # Vite + esbuild
-npm start           # production server on 127.0.0.1:8377
-```
+| Agent loop (multi-step tool calling) | Tool registry + approval flow exist, but chat does not yet perform automatic multi-step tool calling. |
+| Web search | A `web_search` tool implementation exists, but it is not yet orchestrated by chat as an AI tool; backend parsing/default-provider reliability needs more work. |
+| MCP connectors | No MCP client/runtime is implemented. |
+| Terminal isolation | The allowlisted runner executes on the host; it is not a virtual/container sandbox. Do not treat it as isolated. |
+| Memory extraction | Memory storage is opt-in, but the assistant does not automatically extract and save memories from chats. |
+| AI task suggestions and pause/resume | Suggestions are not generated contextually by the model; Stop exists, but there is no pause/resume generation flow. |
+| Manus provider | Not enabled: this adapter supports synchronous Chat Completions and Anthropic Messages, not Manus’s distinct asynchronous Responses/Tasks API. |
+| Plugin code execution | Plugins install/register manifests but their `index.js` is not loaded or invoked. |
+| Backup of user files | User files are not included in v1 backups; folders must be re-granted after restore. |
+| Enter-to-send setting | Setting is saved but the composer does not currently read it. |
+| Audio / voice | Settings toggle exists; microphone and TTS pipelines do not. |
+| Git / GitHub connectors | Permission slugs are defined, but no connector implementation is included. |
+| Browser E2E tests | No automated browser E2E suite yet; manual browser smoke test on desktop and a phone-width screenshot only. |
