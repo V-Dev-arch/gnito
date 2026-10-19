@@ -22,8 +22,15 @@ your own key).
 - **Projects**: organize chats + per-project instructions.
 - **Files**: browse and edit files in folders you explicitly approve
   (least-privilege grants, path-traversal defenses).
-- **Tools**: web search, URL reader, file read/write/delete — each behind
-  a permission gate with an audit log.
+- **Web search**: opt-in per chat turn; source links are saved with the chat and
+  passed to the selected model as untrusted evidence.
+- **Terminal**: one-shot commands in a Docker-only isolated workspace, with
+  visible command/output history and no host-shell fallback.
+- **Files**: read/write/delete tools respect approved folder permissions and
+  record runs in the local audit history.
+- **AI tool chaining**: automatic model-directed tool execution is not yet
+  implemented; the Terminal is user-operated and Web search is explicitly
+  enabled per turn. See `docs/implementation-status.md` for current limits.
 - **Automation Center**: schedule natural-language tasks via the local
   backend scheduler (cron). Missed-run policies and dry-run mode.
 - **Incognito Mode**: temporary chats held in memory only. Never written
@@ -33,7 +40,9 @@ your own key).
 
 ## Install
 
-Requires Node.js 20.19+.
+Requires Node.js 20.19+. Docker Engine or Docker Desktop is optional for the
+rest of Gnito, but required for Terminal. Build its prepared image from the
+repository root with the command in [the terminal sandbox guide](docs/terminal-sandbox.md).
 
 ```bash
 git clone <your-fork> gnito
@@ -65,6 +74,7 @@ Everything Gnito saves lives under `~/.gnito/` (configurable via
 | `~/.gnito/secrets.enc` | Encrypted provider API keys (AES-256-GCM) |
 | `~/.gnito/.gnito-master-key` | Vault master key (mode 0600) — see `docs/security.md` |
 | `~/.gnito/backups/` | Encrypted backup archives |
+| `~/.gnito/sandbox-workspace/` | Persistent files available to Docker terminal runs |
 
 ## Security
 
@@ -73,12 +83,18 @@ Everything Gnito saves lives under `~/.gnito/` (configurable via
 - Session-token + CSRF protection on all API routes.
 - Path traversal and symlink escape blocked at every file route.
 - Provider keys never logged or exposed to the client.
+- Terminal runs only in a restricted Docker container; only the dedicated
+  sandbox workspace is mounted, container networking is disabled, and Gnito
+  must run as a non-root OS user. The workspace has a 256 MiB monitored cap
+  with 128 MiB disk headroom. Docker and the host kernel remain part of the
+  security boundary.
 - See `docs/security.md` for the full threat model.
 
 ## Documentation
 
 - `docs/architecture.md` — system design and module layout
 - `docs/security.md` — threat model and security notes
+- `docs/terminal-sandbox.md` — Docker setup, sandbox limits and image updates
 - `docs/design-system.md` — tokens, themes, accessibility
 - `docs/plugin-sdk.md` — writing your own plugin
 - `docs/implementation-status.md` — what's complete vs. partial

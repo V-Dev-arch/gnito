@@ -13,6 +13,7 @@
 | Unauthenticated API access | All `/api/*` routes require a session token (except `/api/session`) |
 | Wrong/corrupt backup archive | AES-256-GCM auth-tag check fails with 400 `wrong-password` |
 | Local-network exposure | Binds `127.0.0.1` by default |
+| SSRF via search or URL reading | Rejects private, loopback, link-local, unspecified, mapped and special-use IP ranges; validates every DNS answer and pins it for the outbound connection; response sizes are capped and redirects are not followed |
 
 ## Deliberate network deployments
 
@@ -50,16 +51,38 @@ Every tool declares required permissions. High-risk tools require an
 explicit user approval step before execution:
 
 - `files:write`, `files:delete` — user must approve the specific run.
-- `terminal:run` — additionally gated behind an allowlist of allowed
-  first tokens (Settings → Tools). Commands not in the allowlist are
-  rejected without ever spawning a process.
+- `terminal:run` — user approval is bound to the exact command. It runs only
+  in the Docker sandbox described below; a missing Docker runtime is a hard
+  failure, never a reason to execute on the host.
+- Web search only runs after the user enables the composer’s Web search toggle
+  for that turn. With the default backend, the query is sent to Brave Search and
+  may be sent once to DuckDuckGo if Brave fails or returns a challenge. A
+  configured public HTTPS endpoint is used on its own. Private/local DNS
+  answers and redirects are blocked; fetched snippets are treated as untrusted
+  data by the model. `read_url` applies the same outbound-address policy.
 
 ## Terminal + sandbox
 
-Gnito's `terminal_run` tool runs on the **host**, not in a sandbox.
-We do not mislabel it as sandboxed. The allowlist is the mitigation.
-For true sandboxing, run Gnito inside a container/VM and treat the
-whole environment as the trust boundary.
+Gnito’s `terminal_run` tool uses a Docker container with a pinned Alpine base,
+no network, a read-only root filesystem, dropped capabilities,
+`no-new-privileges`, resource limits, and a single read/write mount for the
+dedicated `sandbox-workspace` directory. The server refuses to run Terminal
+when Gnito itself is running as root. A host-side watchdog caps the persistent
+workspace at 256 MiB and preserves 128 MiB of free disk space; this is a
+periodic software monitor rather than a kernel-enforced filesystem quota, so
+brief write overshoot is possible. The container receives a minimal
+environment; it does not receive provider keys, the Docker socket, the Gnito
+data directory, or other host paths. The host shell is never used as fallback.
+Commands can still modify or delete anything inside the mounted workspace, so
+review the exact command before approving it.
+
+Docker is a privileged host service and containers share the host kernel. This
+reduces risk but is not equivalent to a separate virtual machine; maintain the
+host kernel and Docker Engine, and do not expose the Docker daemon to untrusted
+networks. The container’s network is disabled by default, which intentionally
+prevents package downloads from within a run. See
+[`docs/terminal-sandbox.md`](terminal-sandbox.md) for setup and the full
+runtime configuration.
 
 ## Vault details
 

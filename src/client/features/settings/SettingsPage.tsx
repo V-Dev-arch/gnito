@@ -1,10 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock } from 'lucide-react';
+import { Settings, KeyRound, Database, Shield, Download, Upload, Trash2, Zap, Mic, Lock, Search } from 'lucide-react';
+import { CUSTOM_PROVIDER_PRESET, MANUS_PROVIDER_NOTICE, PROVIDER_PRESETS, type ProviderPreset } from '../../../shared/providerPresets';
 import { api } from '../../lib/api';
 import { useToast } from '../../lib/toast';
+import { ProviderLogo } from '../../ui/ProviderLogo';
 
 interface Provider {
   id: string; kind: string; label: string; baseUrl: string; enabled: boolean; hasKey: boolean;
+}
+
+function providerPresetFor(provider: Provider): ProviderPreset {
+  return PROVIDER_PRESETS.find(p => provider.baseUrl.replace(/\/$/, '').startsWith(p.baseUrl.replace(/\/$/, '')))
+    || { ...CUSTOM_PROVIDER_PRESET, label: provider.label, baseUrl: provider.baseUrl };
 }
 
 const SECTIONS = [
@@ -13,6 +20,7 @@ const SECTIONS = [
   { id: 'storage', label: 'Local Storage', icon: Database },
   { id: 'memory', label: 'Memory & Privacy', icon: Shield },
   { id: 'automations', label: 'Automations', icon: Zap },
+  { id: 'tools', label: 'Tools & Search', icon: Search },
   { id: 'audio', label: 'Audio & Mic', icon: Mic },
   { id: 'backup', label: 'Backup & Restore', icon: Download },
   { id: 'diagnostics', label: 'Diagnostics', icon: Lock },
@@ -22,8 +30,10 @@ export function SettingsPage() {
   const [section, setSection] = useState('general');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [searchBackendDraft, setSearchBackendDraft] = useState('');
   const [diagnostics, setDiagnostics] = useState<any>(null);
-  const [newProvider, setNewProvider] = useState({ label: '', baseUrl: '', apiKey: '', kind: 'openai-compatible' });
+  const [presetId, setPresetId] = useState('openai');
+  const [newProvider, setNewProvider] = useState({ label: PROVIDER_PRESETS[0].label, baseUrl: PROVIDER_PRESETS[0].baseUrl, apiKey: '', kind: PROVIDER_PRESETS[0].kind as string });
   const [backupPassword, setBackupPassword] = useState('');
   const [backups, setBackups] = useState<any[]>([]);
   const [restoreInfo, setRestoreInfo] = useState({ path: '', password: '' });
@@ -33,7 +43,9 @@ export function SettingsPage() {
   const load = async () => {
     try {
       setProviders(await api.get('/api/providers'));
-      setSettings(await api.get('/api/settings'));
+      const loadedSettings = await api.get('/api/settings');
+      setSettings(loadedSettings);
+      setSearchBackendDraft(loadedSettings['workspace.searchBackend'] || '');
       setDiagnostics(await api.get('/api/diagnostics'));
       setBackups(await api.get('/api/backup/list'));
     } catch (e: any) { setError(e.message); }
@@ -42,10 +54,13 @@ export function SettingsPage() {
 
   const addProvider = async () => {
     if (!newProvider.label || !newProvider.baseUrl) { push('Label and base URL are required.', 'error'); return; }
+    if (newProvider.kind !== 'custom' && !newProvider.apiKey.trim()) { push('Add an API key for this provider.', 'error'); return; }
     try {
-      await api.post('/api/providers', newProvider);
+      const { apiKey, ...providerInput } = newProvider;
+      await api.post('/api/providers', { ...providerInput, ...(apiKey ? { apiKey } : {}) });
       push('Provider added. Key stored encrypted locally.', 'success');
-      setNewProvider({ label: '', baseUrl: '', apiKey: '', kind: 'openai-compatible' });
+      setPresetId('openai');
+      setNewProvider({ label: PROVIDER_PRESETS[0].label, baseUrl: PROVIDER_PRESETS[0].baseUrl, apiKey: '', kind: PROVIDER_PRESETS[0].kind });
       load();
     } catch (e: any) { push(e.message, 'error'); }
   };
@@ -79,6 +94,24 @@ export function SettingsPage() {
 
   const setSetting = (key: string, value: string) => {
     api.put(`/api/settings/${key}`, { value }).then(() => load()).catch(e => push(e.message, 'error'));
+  };
+
+  const saveSearchBackend = async (override?: string) => {
+    const value = (override ?? searchBackendDraft).trim();
+    if (value) {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error();
+      } catch {
+        push('Enter an HTTPS search endpoint without embedded credentials or a fragment.', 'error');
+        return;
+      }
+    }
+    try {
+      await api.put('/api/settings/workspace.searchBackend', { value });
+      push(value ? 'Search backend saved.' : 'Default Brave Search restored.', 'success');
+      await load();
+    } catch (e: any) { push(e.message, 'error'); }
   };
 
   const SectionIcon = SECTIONS.find(s => s.id === section)?.icon || Settings;
@@ -133,14 +166,20 @@ export function SettingsPage() {
               <div className="card-title">Add a provider</div>
               <div className="card-description">
                 Bring your own key. Costs, quotas, and data policies depend on the provider.
-                Keys are stored encrypted in your local Gnito data dir and never leave your machine except to call the provider.
+                Keys are stored encrypted in your local Gnito data dir and sent only to the selected provider. Manus runs remotely on Manus infrastructure; it does not use Gnito’s local sandbox or MCP connectors.
               </div>
               <div className="field-row">
                 <div className="field">
-                  <label className="label" htmlFor="sp-kind">Type</label>
-                  <select id="sp-kind" className="select" value={newProvider.kind} onChange={e => setNewProvider({ ...newProvider, kind: e.target.value })} data-testid="select-provider-kind">
-                    <option value="openai-compatible">OpenAI-compatible</option>
-                    <option value="anthropic-compatible">Anthropic-compatible</option>
+                  <label className="label" htmlFor="sp-preset">Provider</label>
+                  <select id="sp-preset" className="select" value={presetId} onChange={e => {
+                    const value = e.target.value;
+                    setPresetId(value);
+                    const preset = PROVIDER_PRESETS.find(p => p.id === value);
+                    if (preset) setNewProvider(current => ({ ...current, label: preset.label, baseUrl: preset.baseUrl, kind: preset.kind }));
+                    else setNewProvider(current => ({ ...current, label: '', baseUrl: '', kind: 'custom' }));
+                  }} data-testid="select-provider-kind">
+                    {PROVIDER_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    <option value="custom">Custom OpenAI-compatible</option>
                   </select>
                 </div>
                 <div className="field">
@@ -150,8 +189,9 @@ export function SettingsPage() {
               </div>
               <div className="field">
                 <label className="label" htmlFor="sp-url">Base URL</label>
-                <input id="sp-url" className="input" value={newProvider.baseUrl} onChange={e => setNewProvider({ ...newProvider, baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" data-testid="input-provider-url" />
+                <input id="sp-url" className="input" value={newProvider.baseUrl} onChange={e => setNewProvider({ ...newProvider, baseUrl: e.target.value })} placeholder="https://your-provider.example/v1" readOnly={presetId !== 'custom'} data-testid="input-provider-url" />
               </div>
+              <div className="provider-note">{presetId === 'custom' ? 'Use the API root for an OpenAI-compatible endpoint. Model discovery uses its /models route.' : presetId === 'manus' ? `${MANUS_PROVIDER_NOTICE} Choose a Manus agent profile below rather than a model ID.` : 'Preset includes the official provider API root. Add your own API key to connect.'}</div>
               <div className="field">
                 <label className="label" htmlFor="sp-key">API key (stored encrypted, never shown again)</label>
                 <input id="sp-key" type="password" className="input" value={newProvider.apiKey} onChange={e => setNewProvider({ ...newProvider, apiKey: e.target.value })} placeholder="sk-…" data-testid="input-provider-key" />
@@ -161,7 +201,7 @@ export function SettingsPage() {
 
             {providers.map(p => (
               <div key={p.id} className="card" style={{ marginBottom: 12 }} data-testid={`provider-${p.id}`}>
-                <div className="card-title">{p.label} <span style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)', fontWeight: 400 }}>{p.kind}</span></div>
+                <div className="provider-card-title"><ProviderLogo preset={providerPresetFor(p)} size={22} /><div className="card-title">{p.label} <span style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)', fontWeight: 400 }}>{p.kind}</span></div></div>
                 <div className="card-description">{p.baseUrl}</div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button className="btn btn-secondary btn-sm" onClick={() => testProvider(p.id)} data-testid={`button-test-${p.id}`}>Test connection</button>
@@ -255,6 +295,23 @@ export function SettingsPage() {
                 <option value="run-once-on-startup">Run once on startup</option>
                 <option value="catch-up-within-window">Catch up</option>
               </select>
+            </div>
+          </div>
+        )}
+
+        {section === 'tools' && (
+          <div className="card">
+            <div className="card-title">Web search backend</div>
+            <div className="card-description">
+              Leave this blank to use Brave Search; if it is rate-limited or challenged, Gnito tries DuckDuckGo once. This fallback sends the query to DuckDuckGo. You can set a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Gnito accepts HTML or SearXNG JSON; snippets are treated as untrusted content.
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="search-backend">Search endpoint URL</label>
+              <input id="search-backend" className="input" value={searchBackendDraft} onChange={event => setSearchBackendDraft(event.target.value)} placeholder="Default Brave Search" data-testid="input-search-backend" />
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn btn-primary" onClick={() => void saveSearchBackend()} data-testid="button-save-search-backend">Save endpoint</button>
+              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use default search providers</button>
             </div>
           </div>
         )}

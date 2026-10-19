@@ -54,16 +54,16 @@ export function AutomationsPage() {
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 1100, margin: '0 auto', width: '100%' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+    <div className="page-frame">
+      <header className="page-heading page-heading-split">
         <div>
-          <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}><Zap size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Automation Center</h1>
-          <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>Schedule natural-language tasks. Runs on your machine, while Gnito is running.</p>
+          <h1 className="page-title"><Zap size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Automation Center</h1>
+          <p className="page-lede">Schedule natural-language tasks. Runs on your machine, while Gnito is running.</p>
         </div>
         <button className="btn btn-primary" onClick={() => setCreating(true)} data-testid="button-new-automation">
           New automation
         </button>
-      </div>
+      </header>
 
       <div className="automation-warning" role="status" data-testid="automation-warning">
         <AlertTriangle size={16} />
@@ -191,7 +191,7 @@ export function AutomationsPage() {
               <div key={r.id} className="tool-run-card" data-testid={`run-${r.id}`}>
                 <div className="tool-run-header">
                   <span className="tool-run-name">{r.status}</span>
-                  <span className="tool-run-status {r.status}">{r.startedAt ? new Date(r.startedAt).toLocaleString() : 'not started'}</span>
+                  <span className={`tool-run-status ${r.status}`}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : 'not started'}</span>
                 </div>
                 {r.resultSummary && <div className="tool-run-details">{r.resultSummary.slice(0, 500)}</div>}
                 {r.error && <div className="tool-run-details" style={{ color: 'var(--color-error)' }}>{r.error}</div>}
