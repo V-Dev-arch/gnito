@@ -697,7 +697,7 @@ function safeProviderStatusError(status: number, operation: string): string {
 }
 
 function safeProviderError(error: unknown, operation: string): string {
-  if (error instanceof ProviderHttpError) return safeProviderStatusError(error.status, operation);
+  if (error instanceof ProviderHttpError) return safeProviderStatusError(error.status, error.operation || operation);
   const err = error as { name?: string; code?: string; cause?: { code?: string } } | null;
   if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return `${operation} timed out.`;
   if (err?.name === 'SyntaxError') return `${operation} returned invalid JSON.`;

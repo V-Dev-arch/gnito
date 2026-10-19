@@ -12,6 +12,7 @@ let getSandboxStatus: any;
 let runSandboxCommand: any;
 let buildDockerRunArgs: any;
 let webSearch: any;
+let executeWebSearch: any;
 let readUrl: any;
 let toolRegistry: Map<string, any>;
 let parseDuckDuckGoResults: any;
@@ -40,6 +41,7 @@ beforeAll(async () => {
   buildDockerRunArgs = sandbox.buildDockerRunArgs;
   const tools = await import('../../src/server/api/tools.js');
   webSearch = tools.TOOL_REGISTRY.get('web_search');
+  executeWebSearch = tools.executeWebSearch;
   readUrl = tools.TOOL_REGISTRY.get('read_url');
   toolRegistry = tools.TOOL_REGISTRY;
   parseDuckDuckGoResults = tools.parseDuckDuckGoResults;
@@ -160,6 +162,38 @@ describe('Web search', () => {
     const html = '<a href="https://example.com/docs" target="_self"><div class="title search-snippet-title">Example &amp; Title</div></a><div class="generic-snippet"><div class="content">Helpful <strong>source</strong> snippet.</div></div>';
     const results = parseBraveResults(html, new URL('https://search.brave.com/search'), 5);
     expect(results).toEqual([{ title: 'Example & Title', url: 'https://example.com/docs', snippet: 'Helpful source snippet.' }]);
+  });
+
+  it('falls back once from default Brave Search after a 429', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
+    const visited: string[] = [];
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
+      visited.push(url.hostname);
+      if (url.hostname === 'search.brave.com') {
+        return { status: 429, headers: { get: name => name === 'retry-after' ? '30' : null }, body: 'rate limited' };
+      }
+      return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'text/html' : null },
+        body: '<a class="result__a" href="https://example.com/article">Current source</a><a class="result__snippet">A useful result.</a>',
+      };
+    });
+    expect(visited).toEqual(['search.brave.com', 'html.duckduckgo.com']);
+    expect(result.error).toBeUndefined();
+    expect(result.output.results).toEqual([{ title: 'Current source', url: 'https://example.com/article', snippet: 'A useful result.' }]);
+  });
+
+  it('reports an explicitly configured backend 429 and Retry-After without switching providers', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', ?)").run('https://search.example/search');
+    let calls = 0;
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async () => {
+      calls++;
+      return { status: 429, headers: { get: name => name === 'retry-after' ? '45' : null }, body: 'private upstream body' };
+    });
+    expect(calls).toBe(1);
+    expect(result.error).toContain('HTTP 429');
+    expect(result.error).toContain('Retry-After: 45');
+    expect(result.error).not.toContain('private upstream body');
   });
 
   it('persists the run and can link a first-turn search to its newly created chat', async () => {

@@ -55,10 +55,11 @@ explicit user approval step before execution:
   in the Docker sandbox described below; a missing Docker runtime is a hard
   failure, never a reason to execute on the host.
 - Web search only runs after the user enables the composer’s Web search toggle
-  for that turn. The query is sent to Brave Search or a configured public HTTPS
-  endpoint. Private/local DNS answers and redirects are blocked; fetched
-  snippets are treated as untrusted data by the model. `read_url` applies the
-  same outbound-address policy.
+  for that turn. With the default backend, the query is sent to Brave Search and
+  may be sent once to DuckDuckGo if Brave fails or returns a challenge. A
+  configured public HTTPS endpoint is used on its own. Private/local DNS
+  answers and redirects are blocked; fetched snippets are treated as untrusted
+  data by the model. `read_url` applies the same outbound-address policy.
 
 ## Terminal + sandbox
 

@@ -42,32 +42,45 @@ interface ToolDef {
 export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 
 // --- web_search ---------------------------------------------------------
-TOOL_REGISTRY.set('web_search', {
-  name: 'web_search',
-  description: 'Search the public web via the configured search provider (SearXNG or Brave Search fallback).',
-  permissions: ['network:web-search'],
-  requiresConfirmation: false,
-  inputSchema: z.object({
-    query: z.string().min(1).max(500),
-    maxResults: z.number().int().min(1).max(20).default(10),
-  }),
-  execute: async (input, signal) => {
+const DEFAULT_SEARCH_TARGETS = [
+  { label: 'Brave Search', url: 'https://search.brave.com/search' },
+  { label: 'DuckDuckGo', url: 'https://html.duckduckgo.com/html/' },
+] as const;
+
+export async function executeWebSearch(
+  input: { query: string; maxResults: number },
+  signal: AbortSignal,
+  fetcher: typeof fetchPublicUrl = fetchPublicUrl,
+): Promise<{ output?: any; error?: string }> {
+  const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
+  const configuredBackend = typeof backend?.value === 'string' ? backend.value.trim() : '';
+  const targets = configuredBackend
+    ? [{ label: 'Configured search backend', url: configuredBackend }]
+    : [...DEFAULT_SEARCH_TARGETS];
+  const failures: string[] = [];
+
+  for (let index = 0; index < targets.length; index++) {
+    const { label, url } = targets[index];
     try {
-      const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
-      const backendUrl = backend?.value?.trim() || 'https://search.brave.com/search';
-      const target = new URL(backendUrl);
+      const target = new URL(url);
       if (target.protocol !== 'https:' || target.username || target.password || target.hash) {
         return { error: 'Search backend must be a public HTTPS URL without embedded credentials or a fragment.' };
       }
       target.searchParams.set('q', input.query);
-      if (backend?.value && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
-      const resp = await fetchPublicUrl(target, {
+      if (configuredBackend && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
+      const resp = await fetcher(target, {
         signal,
         timeoutMs: 10_000,
         maxBytes: 1_000_000,
         headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)', Accept: 'text/html, application/json' },
       });
-      if (resp.status !== 200) return { error: `Search returned HTTP ${resp.status}. Redirects are not followed; the endpoint may be rate-limiting or challenging automated requests.` };
+      if (resp.status !== 200) {
+        const retryAfter = resp.headers.get('retry-after')?.slice(0, 80);
+        failures.push(`${label} returned HTTP ${resp.status}${retryAfter ? ` (Retry-After: ${retryAfter})` : ''}.`);
+        if (index < targets.length - 1) continue;
+        return { error: searchFailureMessage(failures, !configuredBackend) };
+      }
+
       const contentType = resp.headers.get('content-type') || '';
       const results = /application\/json/i.test(contentType)
         ? parseSearxResults(resp.body, target, input.maxResults)
@@ -76,14 +89,43 @@ TOOL_REGISTRY.set('web_search', {
           : /(^|\.)bing\.com$/i.test(target.hostname)
             ? parseBingResults(resp.body, target, input.maxResults)
             : parseDuckDuckGoResults(resp.body, target, input.maxResults);
-      if (!results.length) return { error: 'Search provider returned no parseable results. It may have sent a challenge page or no results for this query; configure a public HTTPS SearXNG endpoint to change providers.' };
+      if (!results.length) {
+        failures.push(`${label} returned no parseable results; it may have sent a challenge page or no results for this query.`);
+        if (index < targets.length - 1) continue;
+        return { error: searchFailureMessage(failures, !configuredBackend) };
+      }
       return { output: { query: input.query, results } };
-    } catch (e: any) {
-      if (e?.name === 'AbortError') return { error: 'Search timed out.' };
-      if (/public IP|HTTPS URL|byte limit|Only credential-free|timed out/i.test(String(e?.message || ''))) return { error: e.message };
-      return { error: 'Web search failed. Check the search backend URL, network connection, and provider response.' };
+    } catch (error: any) {
+      if (signal.aborted || error?.name === 'AbortError') return { error: 'Search timed out.' };
+      const message = String(error?.message || '');
+      const detail = /public IP|HTTPS URL|byte limit|Only credential-free|timed out/i.test(message)
+        ? message
+        : 'request failed.';
+      failures.push(`${label}: ${detail}`);
+      if (index < targets.length - 1) continue;
+      return { error: searchFailureMessage(failures, !configuredBackend) };
     }
-  },
+  }
+
+  return { error: searchFailureMessage(failures, !configuredBackend) };
+}
+
+function searchFailureMessage(failures: string[], usedDefaultProviders: boolean): string {
+  const source = failures.join(' ');
+  const providerState = usedDefaultProviders ? 'Both default search providers are unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
+  return `${source} ${providerState} Try again later or configure another public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
+}
+
+TOOL_REGISTRY.set('web_search', {
+  name: 'web_search',
+  description: 'Search the public web via a configured provider, or Brave Search with one DuckDuckGo fallback when using the default.',
+  permissions: ['network:web-search'],
+  requiresConfirmation: false,
+  inputSchema: z.object({
+    query: z.string().min(1).max(500),
+    maxResults: z.number().int().min(1).max(20).default(10),
+  }),
+  execute: (input, signal) => executeWebSearch(input, signal),
 });
 
 // --- read_url ------------------------------------------------------------

@@ -83,6 +83,38 @@ describe('provider response safety', () => {
     });
   });
 
+  it('identifies upstream 429s from the tool-enabled provider path without exposing the response body', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '30' });
+      res.end(JSON.stringify({ error: { message: 'UPSTREAM_PRIVATE_RATE_LIMIT_BODY' } }));
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    try {
+      await withServer(app, async baseUrl => {
+        const createdResponse = await fetch(`${baseUrl}/api/providers`, {
+          method: 'POST', headers: headers(session, true), body: JSON.stringify(createProviderPayload(`http://127.0.0.1:${upstreamPort}/v1`)),
+        });
+        const { id } = await createdResponse.json() as { id: string };
+        const chatId = randomUUID();
+        getDb().prepare('INSERT INTO chats (id, project_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+          .run(chatId, null, 'Rate limit test', 'active', Date.now(), Date.now());
+
+        const response = await fetch(`${baseUrl}/api/providers/${id}/chat`, {
+          method: 'POST', headers: headers(session, true),
+          body: JSON.stringify({ model: 'mock-model', messages: [{ role: 'user', content: 'Check the network.' }], chatId, allowTerminal: true, allowNetwork: true }),
+        });
+        const events = await response.text();
+        expect(response.status).toBe(200);
+        expect(events).toContain('Tool-enabled chat request failed (HTTP 429: the provider rate limit was reached)');
+        expect(events).not.toContain('UPSTREAM_PRIVATE_RATE_LIMIT_BODY');
+      });
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it('does not expose arbitrary upstream response bodies in model-discovery errors', async () => {
     const upstream = createServer((_req, res) => {
       res.writeHead(401, { 'content-type': 'application/json' });

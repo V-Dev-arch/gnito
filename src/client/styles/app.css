@@ -8,6 +8,7 @@
   display: grid;
   grid-template-columns: auto 1fr;
   min-height: 100dvh;
+  height: 100dvh;
 }
 .app-shell.sidebar-collapsed { grid-template-columns: 64px 1fr; }
 .app-shell.mobile { grid-template-columns: 1fr; }
