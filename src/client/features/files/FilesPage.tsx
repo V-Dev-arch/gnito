@@ -56,13 +56,15 @@ export function FilesPage() {
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 1100, margin: '0 auto', width: '100%' }}>
-      <div style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}><FileText size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Files</h1>
-        <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+    <div className="page-frame">
+      <header className="page-heading">
+        <div>
+        <h1 className="page-title"><FileText size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Files</h1>
+        <p className="page-lede">
           Browse folders you've explicitly approved. Gnito cannot see anything outside these roots.
         </p>
-      </div>
+        </div>
+      </header>
 
       {error && <div className="card" style={{ borderColor: 'var(--color-error)', marginBottom: 16 }}>{error}</div>}
 
@@ -82,7 +84,7 @@ export function FilesPage() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 16 }}>
+      <div className="files-layout">
         <div className="card">
           <div className="card-title">Approved folders</div>
           {grants.length === 0 && <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>None yet.</div>}

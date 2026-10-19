@@ -32,11 +32,13 @@ export function ProjectsPage() {
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 900, margin: '0 auto', width: '100%' }}>
-      <div style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}><Folder size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Projects</h1>
-        <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>Group related chats, files, and instructions.</p>
-      </div>
+    <div className="page-frame">
+      <header className="page-heading">
+        <div>
+          <h1 className="page-title"><Folder size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Projects</h1>
+          <p className="page-lede">Group related chats, files, and instructions.</p>
+        </div>
+      </header>
 
       {error && <div className="card" style={{ borderColor: 'var(--color-error)', marginBottom: 16 }}>{error}</div>}
 

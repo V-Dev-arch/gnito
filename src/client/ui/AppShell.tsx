@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff } from 'lucide-react';
 import { api } from '../lib/api';
@@ -29,6 +29,39 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const previousLocationRef = useRef(location);
+  const mobileOpenRef = useRef(mobileOpen);
+  mobileOpenRef.current = mobileOpen;
+  const openMobileMenu = useCallback(() => {
+    setMobileOpen(true);
+    window.requestAnimationFrame(() => sidebarRef.current?.querySelector<HTMLElement>('a[href], button:not(:disabled)')?.focus());
+  }, []);
+  const closeMobileMenu = useCallback(() => {
+    setMobileOpen(false);
+    window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+  }, []);
+  const trapMobileFocus = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    if (!isMobile || !mobileOpen || event.key !== 'Tab') return;
+    const selector = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+    const focusable = Array.from(sidebarRef.current?.querySelectorAll<HTMLElement>(selector) || [])
+      .filter(element => element.getClientRects().length > 0 && element.tabIndex >= 0);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }, [isMobile, mobileOpen]);
+  useEffect(() => {
+    const sidebar = sidebarRef.current;
+    const main = mainRef.current;
+    if (isMobile && !mobileOpen) sidebar?.setAttribute('inert', '');
+    else sidebar?.removeAttribute('inert');
+    if (isMobile && mobileOpen) main?.setAttribute('inert', '');
+    else main?.removeAttribute('inert');
+  }, [isMobile, mobileOpen]);
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth <= 768);
     check();
@@ -41,14 +74,18 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
       if (alive) setRecentChats(chats.slice(0, 8));
     }).catch(() => { if (alive) setRecentChats([]); });
     api.get('/api/health').then(() => { if (alive) setRuntimeStatus('online'); }).catch(() => { if (alive) setRuntimeStatus('offline'); });
-    setMobileOpen(false);
     return () => { alive = false; };
   }, [location]);
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setMobileOpen(false); };
+    if (previousLocationRef.current === location) return;
+    previousLocationRef.current = location;
+    if (mobileOpenRef.current) closeMobileMenu();
+  }, [location, closeMobileMenu]);
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && mobileOpen) closeMobileMenu(); };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, []);
+  }, [mobileOpen, closeMobileMenu]);
 
   const shellClass = [
     'app-shell',
@@ -61,7 +98,14 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
 
   return (
     <div className={shellClass}>
-      <aside id="primary-navigation" className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`} aria-label="Main navigation">
+      <aside
+        ref={sidebarRef}
+        id="primary-navigation"
+        className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`}
+        aria-label="Main navigation"
+        aria-hidden={isMobile && !mobileOpen}
+        onKeyDown={trapMobileFocus}
+      >
         <div className="sidebar-header">
           <Link href="/" className="sidebar-logo" aria-label="Gnito home">
             <img src="/brand/logo-mono.svg" alt="" width={28} height={28} style={{ color: 'currentColor' }} />
@@ -72,7 +116,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
           </Link>
           <button
             className="btn btn-ghost btn-icon"
-            onClick={() => isMobile ? setMobileOpen(false) : setCollapsed(c => !c)}
+            onClick={() => isMobile ? closeMobileMenu() : setCollapsed(c => !c)}
             aria-label={isMobile ? 'Close menu' : (collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
             aria-expanded={isMobile ? mobileOpen : !collapsed}
             aria-controls="primary-navigation"
@@ -105,7 +149,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
                   href={to}
                   className={`sidebar-link ${active ? 'active' : ''}`}
                   aria-current={active ? 'page' : undefined}
-                  onClick={() => setMobileOpen(false)}
+                  onClick={() => { if (isMobile) closeMobileMenu(); }}
                   data-testid={`link-${to.replace(/\//g, '-') || 'home'}`}
                 >
                   <Icon size={18} />
@@ -150,15 +194,21 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
       </aside>
 
       {isMobile && mobileOpen && (
-        <button className="sidebar-backdrop" onClick={() => setMobileOpen(false)} aria-label="Close navigation" />
+        <button className="sidebar-backdrop" onClick={closeMobileMenu} aria-label="Close navigation" />
       )}
 
-      <main className="app-main" style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', flex: 1 }}>
+      <main
+        className="app-main"
+        ref={mainRef}
+        style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', flex: 1 }}
+        aria-hidden={isMobile && mobileOpen}
+      >
         {isMobile && !mobileOpen && (
           <header className="mobile-topbar" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--color-divider)' }}>
             <button
               className="btn btn-ghost btn-icon"
-              onClick={() => setMobileOpen(true)}
+              ref={mobileMenuButtonRef}
+              onClick={openMobileMenu}
               aria-label="Open navigation"
               aria-expanded={mobileOpen}
               aria-controls="primary-navigation"

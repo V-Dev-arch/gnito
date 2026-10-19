@@ -17,12 +17,12 @@ import { NotFoundPage } from './ui/NotFoundPage';
 
 // ------------------------------------------------------------- theme
 
-type Theme = 'dark' | 'light' | 'system';
+  type Theme = 'dark' | 'light' | 'system';
 
 function useTheme() {
   const [theme, setThemeState] = useState<Theme>(() => {
     const saved = typeof window !== 'undefined' ? window.__gnitoTheme : null;
-    return saved || 'system';
+    return saved || 'dark';
   });
 
   const setTheme = useCallback((t: Theme) => {

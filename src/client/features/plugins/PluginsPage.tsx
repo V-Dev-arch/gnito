@@ -29,13 +29,15 @@ export function PluginsPage() {
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 900, margin: '0 auto', width: '100%' }}>
-      <div style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}><Plug size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Plugins & Integrations</h1>
-        <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+    <div className="page-frame">
+      <header className="page-heading">
+        <div>
+        <h1 className="page-title"><Plug size={20} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />Plugins & Integrations</h1>
+        <p className="page-lede">
           Install plugins from a local directory. Plugin code runs in the Gnito process — review manifests before installing.
         </p>
-      </div>
+        </div>
+      </header>
 
       {error && <div className="card" style={{ borderColor: 'var(--color-error)', marginBottom: 16 }}>{error}</div>}
 
