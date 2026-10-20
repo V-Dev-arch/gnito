@@ -44,8 +44,20 @@ export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 // --- web_search ---------------------------------------------------------
 const DEFAULT_SEARCH_TARGETS = [
   { label: 'Brave Search', url: 'https://search.brave.com/search' },
-  { label: 'DuckDuckGo', url: 'https://html.duckduckgo.com/html/' },
+  { label: 'DuckDuckGo Lite', url: 'https://lite.duckduckgo.com/lite/' },
 ] as const;
+const SEARCH_ATTEMPT_TIMEOUT_MS = 7_000;
+const SEARCH_ROUTE_TIMEOUT_MS = 18_000;
+
+function isBuiltInSearchBackend(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return (host === 'search.brave.com' && /^\/search\/?$/.test(url.pathname))
+      || (host === 'html.duckduckgo.com' && /^\/html\/?$/.test(url.pathname))
+      || (host === 'lite.duckduckgo.com' && /^\/lite\/?$/.test(url.pathname));
+  } catch { return false; }
+}
 
 export async function executeWebSearch(
   input: { query: string; maxResults: number },
@@ -54,7 +66,10 @@ export async function executeWebSearch(
 ): Promise<{ output?: any; error?: string }> {
   const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
   const configuredBackend = typeof backend?.value === 'string' ? backend.value.trim() : '';
-  const targets = configuredBackend
+  // Treat saved legacy/default URLs as the built-in provider set so old
+  // settings still get the working fallback after a Brave rate limit.
+  const usesDefaultProviders = !configuredBackend || isBuiltInSearchBackend(configuredBackend);
+  const targets = !usesDefaultProviders
     ? [{ label: 'Configured search backend', url: configuredBackend }]
     : [...DEFAULT_SEARCH_TARGETS];
   const failures: string[] = [];
@@ -67,18 +82,22 @@ export async function executeWebSearch(
         return { error: 'Search backend must be a public HTTPS URL without embedded credentials or a fragment.' };
       }
       target.searchParams.set('q', input.query);
-      if (configuredBackend && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
+      if (!usesDefaultProviders && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
       const resp = await fetcher(target, {
         signal,
-        timeoutMs: 10_000,
+        timeoutMs: SEARCH_ATTEMPT_TIMEOUT_MS,
         maxBytes: 1_000_000,
-        headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)', Accept: 'text/html, application/json' },
+        headers: {
+          'User-Agent': 'Gnito/0.1 (local-first AI workspace)',
+          Accept: 'text/html, application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
       });
       if (resp.status !== 200) {
         const retryAfter = resp.headers.get('retry-after')?.slice(0, 80);
         failures.push(`${label} returned HTTP ${resp.status}${retryAfter ? ` (Retry-After: ${retryAfter})` : ''}.`);
         if (index < targets.length - 1) continue;
-        return { error: searchFailureMessage(failures, !configuredBackend) };
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
       }
 
       const contentType = resp.headers.get('content-type') || '';
@@ -86,13 +105,15 @@ export async function executeWebSearch(
         ? parseSearxResults(resp.body, target, input.maxResults)
         : /(^|\.)search\.brave\.com$/i.test(target.hostname)
           ? parseBraveResults(resp.body, target, input.maxResults)
+          : /(^|\.)lite\.duckduckgo\.com$/i.test(target.hostname)
+            ? parseDuckDuckGoLiteResults(resp.body, target, input.maxResults)
           : /(^|\.)bing\.com$/i.test(target.hostname)
             ? parseBingResults(resp.body, target, input.maxResults)
             : parseDuckDuckGoResults(resp.body, target, input.maxResults);
       if (!results.length) {
         failures.push(`${label} returned no parseable results; it may have sent a challenge page or no results for this query.`);
         if (index < targets.length - 1) continue;
-        return { error: searchFailureMessage(failures, !configuredBackend) };
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
       }
       return { output: { query: input.query, results } };
     } catch (error: any) {
@@ -103,11 +124,11 @@ export async function executeWebSearch(
         : 'request failed.';
       failures.push(`${label}: ${detail}`);
       if (index < targets.length - 1) continue;
-      return { error: searchFailureMessage(failures, !configuredBackend) };
+      return { error: searchFailureMessage(failures, usesDefaultProviders) };
     }
   }
 
-  return { error: searchFailureMessage(failures, !configuredBackend) };
+  return { error: searchFailureMessage(failures, usesDefaultProviders) };
 }
 
 function searchFailureMessage(failures: string[], usedDefaultProviders: boolean): string {
@@ -118,7 +139,7 @@ function searchFailureMessage(failures: string[], usedDefaultProviders: boolean)
 
 TOOL_REGISTRY.set('web_search', {
   name: 'web_search',
-  description: 'Search the public web via a configured provider, or Brave Search with one DuckDuckGo fallback when using the default.',
+  description: 'Search the public web via a configured provider, or Brave Search with one DuckDuckGo Lite fallback when using the default.',
   permissions: ['network:web-search'],
   requiresConfirmation: false,
   inputSchema: z.object({
@@ -492,6 +513,22 @@ export function parseDuckDuckGoResults(html: string, base: URL, maxResults: numb
   return results;
 }
 
+export function parseDuckDuckGoLiteResults(html: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
+  const results: { title: string; url: string; snippet: string }[] = [];
+  const anchors = /<a\b(?=[^>]*\bclass=["'][^"']*\bresult-link\b[^"']*["'])[^>]*>[\s\S]*?<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchors.exec(html)) && results.length < maxResults) {
+    const href = match[0].match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2];
+    const url = href ? safeResultUrl(href, base) : null;
+    if (!url) continue;
+    const title = stripHtml(match[0].replace(/^<a\b[^>]*>/i, '').replace(/<\/a>$/i, '')).slice(0, 250);
+    const afterAnchor = html.slice(match.index + match[0].length, match.index + match[0].length + 2_000);
+    const snippetHtml = afterAnchor.match(/<td\b(?=[^>]*class=["'][^"']*\bresult-snippet\b[^"']*["'])[^>]*>([\s\S]*?)<\/td>/i)?.[1] || '';
+    results.push({ title: title || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
+  }
+  return results;
+}
+
 export function parseSearxResults(body: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
   const data = JSON.parse(body);
   if (!Array.isArray(data?.results)) throw new Error('SearXNG returned an invalid result list.');
@@ -529,7 +566,7 @@ export function registerToolRoutes(app: any): void {
     db.prepare('INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)')
       .run(runId, tool.name, JSON.stringify(parsed.data), 'running', startedAt, context);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const timer = setTimeout(() => controller.abort(), SEARCH_ROUTE_TIMEOUT_MS);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       const result = await tool.execute(parsed.data, controller.signal);

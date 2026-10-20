@@ -229,12 +229,16 @@ button, input, textarea, select { font: inherit; }
 .app-shell.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
 .sidebar {
   width: 264px;
+  height: 100dvh;
+  min-height: 0;
+  max-height: 100dvh;
   background: color-mix(in srgb, var(--color-surface) 92%, var(--color-primary) 8%);
   border-color: var(--color-divider);
   box-shadow: 1px 0 0 color-mix(in srgb, var(--color-border) 70%, transparent);
-  scrollbar-width: thin;
+  overflow: hidden;
 }
 .app-shell.sidebar-collapsed .sidebar { width: 72px; }
+.sidebar-header, .sidebar > .sidebar-section:not(.recent-chats), .sidebar-footer { flex: 0 0 auto; }
 .sidebar-header { min-height: 78px; padding: 15px 14px; border-bottom-color: transparent; }
 .sidebar-logo { gap: 11px; }
 .sidebar-logo img { display: block; border-radius: 9px; }
@@ -252,6 +256,8 @@ button, input, textarea, select { font: inherit; }
 .sidebar-footer { padding: 12px 15px 16px; border-color: var(--color-divider); }
 .sidebar-env-status { min-height: 27px; }
 .sidebar-env-status .btn { border-radius: 9px; }
+.recent-chats { display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; overflow: hidden; }
+.recent-chats > .sidebar-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .app-main { min-width: 0; position: relative; }
 .mobile-topbar {
   position: sticky; top: 0; z-index: var(--z-sticky);
@@ -378,7 +384,7 @@ button, input, textarea, select { font: inherit; }
 
 @media (max-width: 768px) {
   .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: 1fr; }
-  .app-shell .sidebar, .app-shell.sidebar-collapsed .sidebar { width: min(310px, 88vw); }
+  .app-shell .sidebar, .app-shell.sidebar-collapsed .sidebar { width: min(310px, 88vw); height: 100dvh; max-height: 100dvh; }
   .chat-container { padding: 18px 16px 176px; }
   .chat-header { margin: -18px -16px 22px; padding: 15px 16px 13px; }
   .composer { padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
@@ -387,6 +393,12 @@ button, input, textarea, select { font: inherit; }
   .settings-layout { padding: 16px 12px 25px; gap: 15px; }
   .settings-nav { border-radius: 13px; }
   .terminal-page { padding: 20px 14px 32px; }
+}
+@media (max-height: 640px) {
+  .sidebar { overflow: hidden; }
+  .sidebar > nav.sidebar-section:not(.recent-chats) { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  .recent-chats { flex: 1 1 0; min-height: 120px; max-height: none; }
+  .recent-chats > .sidebar-nav { flex: 1 1 auto; min-height: 0; }
 }
 @media (max-width: 420px) {
   .chat-header { align-items: center; }

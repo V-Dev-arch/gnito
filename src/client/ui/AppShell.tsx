@@ -200,7 +200,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
       <main
         className="app-main"
         ref={mainRef}
-        style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', flex: 1 }}
+        style={{ minHeight: 0, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', flex: 1 }}
         aria-hidden={isMobile && mobileOpen}
       >
         {isMobile && !mobileOpen && (
