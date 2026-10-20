@@ -294,7 +294,7 @@ export function registerProviderRoutes(app: any): void {
       if (body.allowTerminal || body.allowImageTools) {
         const text = row.kind === 'anthropic-compatible'
           ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, send, imageUrl: appendEndpoint(row.base_url, '/images/generations') });
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send, imageUrl: appendEndpoint(row.base_url, '/images/generations') });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
@@ -539,8 +539,7 @@ const TERMINAL_TOOL = {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'Shell command to run in /workspace.' },
-        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-        networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 180000 },
       },
       required: ['command'],
       additionalProperties: false,
@@ -555,14 +554,13 @@ const ANTHROPIC_TERMINAL_TOOL = {
     type: 'object',
     properties: {
       command: { type: 'string', description: 'Shell command to run in /workspace.' },
-      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-      networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
+      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 180000 },
     },
     required: ['command'],
   },
 };
 
-const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it only when a command materially helps with the request. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask the user before destructive or irreversible operations. Never claim a command ran unless the tool result confirms it. Gnito automatically applies the user’s explicit Network toggle to each command; never attempt to bypass that permission. When you create an image or video in /workspace, return a Markdown link to /api/terminal/media?path=<URL-encoded absolute /workspace path>; Gnito renders safe image/video previews and provides the matching download button.';
+const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it when commands materially help. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask before destructive or irreversible operations. Never claim a command ran unless its tool result confirms it. The Network toggle is authoritative and Gnito applies it to every command; do not try to change or bypass it. For public GitHub repositories, prefer `git clone https://github.com/OWNER/REPO.git` rather than `gh repo clone`, which may require a CLI login. When cloning or downloading, set `timeoutMs` to at least 180000. If Network is off, explain that it must be enabled before cloning. If a network-enabled clone fails, test `curl -I https://github.com` and `git ls-remote https://github.com/OWNER/REPO.git` and report the exact observed error; do not claim the repo cloned unless the command confirms it. When creating images/videos in /workspace, return a Markdown link to /api/terminal/media?path=<URL-encoded absolute /workspace path> for safe preview and download.';
 
 const IMAGE_TOOL = {
   type: 'function',
@@ -586,7 +584,7 @@ const IMAGE_TOOL_POLICY = 'An image-generation tool is available because the use
 
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean;
+  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; forceImageGeneration: boolean;
   imageUrl: string; send: AgentSend;
 }): Promise<string> {
   const policies = [
@@ -607,7 +605,9 @@ async function runOpenAIAgent(options: {
         ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
         ...(options.allowImageTools ? [IMAGE_TOOL] : []),
       ],
-      tool_choice: 'auto',
+      tool_choice: round === 0 && options.forceImageGeneration
+        ? { type: 'function', function: { name: 'generate_image' } }
+        : 'auto',
     }, options.signal);
     const message = response?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
@@ -626,8 +626,10 @@ async function runOpenAIAgent(options: {
         } else if (call.function?.name === 'generate_image' && options.allowImageTools) {
           if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
           imageCount++;
+          options.send('activity', { message: 'Generating an image with the selected provider…' });
           result = await generateImage(args, options.imageUrl, options.headers, options.signal);
           if (result.output) options.send('media', result.output);
+          else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
         } else {
           throw new Error(`Unsupported or disabled tool requested: ${String(call.function?.name || 'unknown')}`);
         }
@@ -770,6 +772,13 @@ function providerText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('');
   return '';
+}
+
+function hasExplicitImageRequest(messages: { role: string; content: any }[]): boolean {
+  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user');
+  const text = providerText(latestUserMessage?.content);
+  return /\b(?:create|generate|make|draw|paint|illustrate|render|design)\b[\s\S]{0,120}\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b/i.test(text)
+    || /\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b[\s\S]{0,120}\b(?:create|generate|make|draw|paint|illustrate|render|design)\b/i.test(text);
 }
 
 function toAnthropicContent(content: any): any {

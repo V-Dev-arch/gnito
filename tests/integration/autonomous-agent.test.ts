@@ -52,11 +52,13 @@ beforeAll(async () => {
       return;
     }
     if (!body.messages.some((message: any) => message.role === 'tool')) {
-      expect(body.tool_choice).toBe('auto');
       const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'generate_image');
+      if (imageTool) expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+      else expect(body.tool_choice).toBe('auto');
       const tool = imageTool ? 'generate_image' : 'terminal_run';
       expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
-      const args = imageTool ? { prompt: 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la', timeoutMs: 1000, networkAccess: false };
+      if (!imageTool) expect(body.tools.find((entry: any) => entry.function?.name === 'terminal_run').function.parameters.properties.networkAccess).toBeUndefined();
+      const args = imageTool ? { prompt: 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
       const toolMessage = body.messages.find((message: any) => message.role === 'tool');
@@ -112,7 +114,7 @@ describe('autonomous terminal tool loop', () => {
     expect(stream).not.toContain('Thinking…');
     const run = db.prepare('SELECT tool, input, status, context FROM tool_runs WHERE context=? ORDER BY started_at DESC LIMIT 1').get('autonomous-agent-chat') as any;
     expect(run.tool).toBe('terminal_run');
-    expect(JSON.parse(run.input)).toMatchObject({ command: 'pwd && ls -la', networkAccess: false });
+    expect(JSON.parse(run.input)).toMatchObject({ command: 'pwd && ls -la', timeoutMs: 180_000, networkAccess: false });
     expect(run.context).toBe('autonomous-agent-chat');
     expect(['failed', 'succeeded']).toContain(run.status);
   });

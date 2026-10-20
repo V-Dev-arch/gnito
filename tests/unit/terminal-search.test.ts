@@ -249,17 +249,39 @@ describe('Web search', () => {
     expect(results).toEqual([{ title: 'Example & Title', url: 'https://example.com/docs', snippet: 'Helpful source snippet.' }]);
   });
 
-  it('does not call DuckDuckGo after a default Brave Search 429', async () => {
+  it('falls back across default search providers after rate limits', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const visited: string[] = [];
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
       visited.push(url.hostname);
       return { status: 429, headers: { get: name => name === 'retry-after' ? '30' : null }, body: 'private upstream body' };
     });
-    expect(visited).toEqual(['search.brave.com']);
+    expect(visited).toEqual(['search.brave.com', 'www.bing.com', 'html.duckduckgo.com']);
     expect(result.error).toContain('HTTP 429');
+    expect(result.error).toContain('built-in public search providers');
     expect(result.error).toContain('Try again later');
     expect(result.error).not.toContain('private upstream body');
+  });
+
+  it('continues to another default provider after a CAPTCHA challenge', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
+    const visited: string[] = [];
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
+      visited.push(url.hostname);
+      if (url.hostname !== 'html.duckduckgo.com') return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'text/html' : null },
+        body: '<html><title>Security check - CAPTCHA</title><div class="g-recaptcha">private challenge</div></html>',
+      };
+      return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'text/html' : null },
+        body: '<div class="result"><a class="result__a" href="https://example.com/article">Fallback result</a><a class="result__snippet">Fallback snippet</a></div>',
+      };
+    });
+    expect(visited).toEqual(['search.brave.com', 'www.bing.com', 'html.duckduckgo.com']);
+    expect(result.error).toBeUndefined();
+    expect(result.output.results[0].title).toBe('Fallback result');
   });
 
   it('replaces a legacy saved DuckDuckGo URL with Brave rather than requesting DuckDuckGo', async () => {
@@ -274,7 +296,7 @@ describe('Web search', () => {
     expect(result.output.results[0].title).toBe('Brave result');
   });
 
-  it('discards CAPTCHA challenge HTML and never returns its contents', async () => {
+  it('discards CAPTCHA pages from every default provider and never returns their contents', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const challenge = '<html><title>Security check - CAPTCHA</title><div class="g-recaptcha">secret challenge body</div></html>';
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async () => ({

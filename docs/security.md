@@ -56,8 +56,8 @@ explicit user approval step before execution:
   in the Docker sandbox described below; a missing Docker runtime is a hard
   failure, never a reason to execute on the host.
 - Web search only runs after the user enables the composer’s Web search toggle
-  for that turn. With the default backend, the query is sent only to Brave Search;
-  Gnito does not automatically contact DuckDuckGo. Anti-bot and CAPTCHA challenge
+  for that turn. The default tries Brave Search, Bing, then DuckDuckGo when an
+  upstream is rate-limited or returns an anti-bot/CAPTCHA challenge; challenge
   pages are discarded rather than returned to the model. A configured public
   HTTPS endpoint is used on its own. Private/local DNS answers and redirects are
   blocked; fetched snippets are treated as untrusted data by the model. `read_url`

@@ -15,6 +15,7 @@ interface SearchEvent { kind: 'web-search'; query: string; runId: string; result
 interface AgentToolEvent { kind: 'agent-tool'; runId: string; tool: string; command: string; networkAccess: boolean; status: string; output?: { stdout?: string; stderr?: string; exitCode?: number }; error?: string }
 interface Message { id: string; role: 'user' | 'assistant' | 'tool'; content: string; createdAt?: number; providerId?: string; modelId?: string }
 interface Chat { id: string; title: string; projectId: string | null; status: string }
+interface SandboxStatus { available: boolean; image: string; reason?: string }
 interface Props { chatId?: string; projectId?: string }
 interface MemoryEntry { key: string; value: string }
 interface PromptAttachment { id: string; file: File; kind: 'image' | 'text'; dataUrl?: string; text?: string }
@@ -25,6 +26,22 @@ const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT_FILE_BYTES = 180 * 1024;
 const TEXT_FILE_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.js', '.jsx', '.ts', '.tsx', '.py', '.html', '.css', '.scss', '.yaml', '.yml', '.xml', '.log', '.sh', '.sql', '.toml', '.ini', '.env', '.diff', '.patch', '.rs', '.go', '.java', '.c', '.h', '.cpp', '.rb', '.php', '.swift', '.kt']);
+
+function sandboxUnavailableMessage(status: SandboxStatus): string {
+  if (status.reason === 'docker-not-installed') return 'Docker CLI is not installed';
+  if (status.reason === 'docker-daemon-unavailable') return 'Docker daemon is stopped or inaccessible';
+  if (status.reason === 'sandbox-image-not-built') return 'Gnito sandbox image is not built; open Terminal for build instructions';
+  if (status.reason === 'server-running-as-root') return 'Gnito is running as root; run it as a non-root user';
+  return 'Docker sandbox is not ready; open Terminal for setup details';
+}
+
+function supportsImageTools(provider?: Provider): boolean {
+  if (!provider) return false;
+  const baseUrl = provider.baseUrl.replace(/\/+$/, '').toLowerCase();
+  const known = PROVIDER_PRESETS.find(preset => preset.baseUrl && baseUrl.startsWith(preset.baseUrl.replace(/\/+$/, '').toLowerCase()));
+  if (known) return known.id === 'openai';
+  return provider.kind === 'custom' || provider.kind === 'openai-compatible';
+}
 
 function readFileDataUrl(file: File, mimeType: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -214,6 +231,7 @@ export function ChatPage({ chatId, projectId }: Props) {
   const [terminalTools, setTerminalTools] = useState(false);
   const [terminalNetwork, setTerminalNetwork] = useState(false);
   const [imageTools, setImageTools] = useState(false);
+  const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [pendingMedia, setPendingMedia] = useState<GeneratedMedia[]>([]);
   const [searching, setSearching] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -245,8 +263,8 @@ export function ChatPage({ chatId, projectId }: Props) {
   }, [chosenProvider?.kind]);
 
   useEffect(() => {
-    if (chosenProvider?.kind === 'anthropic-compatible' || chosenProvider?.kind === 'manus-agent') setImageTools(false);
-  }, [chosenProvider?.kind]);
+    if (chosenProvider && !supportsImageTools(chosenProvider)) setImageTools(false);
+  }, [chosenProvider?.id, chosenProvider?.kind, chosenProvider?.baseUrl]);
 
   useEffect(() => {
     let alive = true;
@@ -256,6 +274,12 @@ export function ChatPage({ chatId, projectId }: Props) {
       const enabled = ps.filter(p => p.enabled);
       if (!selectedProvider && enabled.length) setSelectedProvider(enabled[0].id);
     }).catch((e: Error) => { if (alive) setError(`Could not load providers: ${e.message}`); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    api.get('/api/tools/sandbox/status').then((status: SandboxStatus) => { if (alive) setSandboxStatus(status); }).catch(() => { if (alive) setSandboxStatus(null); });
     return () => { alive = false; };
   }, []);
 
@@ -442,7 +466,7 @@ export function ChatPage({ chatId, projectId }: Props) {
     setActivity(`Connecting to ${chosenProvider?.label || 'provider'} · ${activeModel}…`);
     abortRef.current = api.streamChat(
       selectedProvider,
-      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools },
+      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider) },
       delta => {
         setActivity(`Generating with ${chosenProvider?.label || 'provider'} · ${activeModel}`);
         setStreamedText(text => text + delta);
@@ -626,9 +650,9 @@ export function ChatPage({ chatId, projectId }: Props) {
         </div>)}<small className="composer-attachment-hint">Sent to the provider for this message only. Reattach it for follow-ups.</small></div>}
         <div className="composer-actions" style={{ flexWrap: 'wrap' }}>
           <button type="button" className={`btn btn-sm ${searchWeb ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSearchWeb(value => !value)} disabled={streaming || saving || searching} aria-pressed={searchWeb} aria-label="Toggle web search" data-testid="button-web-search"><Globe size={14} /> Web search</button>
-          <button type="button" className={`btn btn-sm ${terminalTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { const next = !terminalTools; setTerminalTools(next); if (!next) setTerminalNetwork(false); }} disabled={streaming || saving || searching || chosenProvider?.kind === 'manus-agent'} aria-pressed={terminalTools} title={chosenProvider?.kind === 'manus-agent' ? 'Manus runs remotely and cannot access the local Gnito sandbox.' : 'Allow this provider to run commands in the isolated Gnito Docker workspace for this message.'} data-testid="button-terminal-tools"><Terminal size={14} /> {terminalTools ? 'Terminal allowed' : 'Allow terminal'}</button>
+          <button type="button" className={`btn btn-sm ${terminalTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { const next = !terminalTools; setTerminalTools(next); if (!next) setTerminalNetwork(false); }} disabled={streaming || saving || searching || chosenProvider?.kind === 'manus-agent' || sandboxStatus?.available === false} aria-pressed={terminalTools} title={chosenProvider?.kind === 'manus-agent' ? 'Manus runs remotely and cannot access the local Gnito sandbox.' : sandboxStatus?.available === false ? sandboxUnavailableMessage(sandboxStatus) : 'Allow this provider to run commands in the isolated Gnito Docker workspace for this message.'} data-testid="button-terminal-tools"><Terminal size={14} /> {terminalTools ? 'Terminal allowed' : 'Allow terminal'}</button>
           <button type="button" className={`btn btn-sm ${terminalNetwork ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTerminalNetwork(value => !value)} disabled={!terminalTools || streaming || saving || searching || chosenProvider?.kind === 'manus-agent'} aria-pressed={terminalNetwork} title="Permit terminal commands to use Docker bridge networking for this message." data-testid="button-terminal-network"><Wifi size={14} /> Network {terminalNetwork ? 'on' : 'off'}</button>
-          <button type="button" className={`btn btn-sm ${imageTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setImageTools(value => !value)} disabled={streaming || saving || searching || !chosenProvider || ['anthropic-compatible', 'manus-agent'].includes(chosenProvider.kind)} aria-pressed={imageTools} title="Allow this OpenAI-compatible provider's Images API to generate images; provider charges may apply." data-testid="button-image-tools"><ImagePlus size={14} /> Image tools {imageTools ? 'on' : 'off'}</button>
+          <button type="button" className={`btn btn-sm ${imageTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setImageTools(value => !value)} disabled={streaming || saving || searching || !supportsImageTools(chosenProvider)} aria-pressed={imageTools} title={supportsImageTools(chosenProvider) ? 'Allow this provider’s Images API to generate images; provider charges may apply.' : 'Choose the OpenAI preset or a custom OpenAI-compatible provider with an Images API.'} data-testid="button-image-tools"><ImagePlus size={14} /> Image tools {imageTools ? 'on' : 'off'}</button>
           <div className="composer-model-selector">
             <select className="select" value={selectedProvider} onChange={e => setSelectedProvider(e.target.value)} aria-label="Provider" data-testid="select-provider">
               <option value="">Choose provider</option>{enabledProviders.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
@@ -636,7 +660,7 @@ export function ChatPage({ chatId, projectId }: Props) {
             {models.length > 0 ? <select className="select" value={selectedModel} onChange={e => setSelectedModel(e.target.value)} aria-label="Model" data-testid="select-model">{models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input className="input model-fallback" value={manualModel} onChange={e => setManualModel(e.target.value)} placeholder={modelsLoading ? 'Loading models…' : 'Model ID'} aria-label="Model ID" data-testid="input-model" disabled={modelsLoading} />}
             {modelsLoading && <span className="model-loading" role="status">Loading models</span>}
           </div>
-          <div className="composer-meta"><span>{terminalTools ? `Terminal permission applies to this message only${terminalNetwork ? '; network access is granted to its isolated container.' : '; command network is disabled.'}` : modelsError ? `Model discovery: ${modelsError}` : 'Enter to send · Shift+Enter for a new line'}</span><span className="video-tip"><strong>Video tip:</strong> enable Allow terminal + Network, then ask Gnito to clone <a href="https://github.com/calesthio/OpenMontage" target="_blank" rel="noreferrer">OpenMontage</a> and make a video.</span></div>
+          <div className="composer-meta"><span>{sandboxStatus?.available === false ? `Terminal unavailable: ${sandboxUnavailableMessage(sandboxStatus)}.` : terminalTools ? `Terminal permission applies to this message only${terminalNetwork ? '; network access is granted to its isolated container.' : '; command network is disabled.'}` : modelsError ? `Model discovery: ${modelsError}` : 'Enter to send · Shift+Enter for a new line'}</span><span className="video-tip"><strong>Video tip:</strong> enable Allow terminal + Network, then ask Gnito to clone <a href="https://github.com/calesthio/OpenMontage" target="_blank" rel="noreferrer">OpenMontage</a> and make a video.</span></div>
         </div>
       </div></div>
     </div>
