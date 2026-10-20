@@ -42,9 +42,14 @@ export const api = {
   put: <T = any>(path: string, body?: any) => request<T>('PUT', path, body),
   patch: <T = any>(path: string, body?: any) => request<T>('PATCH', path, body),
   delete: <T = any>(path: string, body?: any) => request<T>('DELETE', path, body),
+  mediaBlob: async (path: string): Promise<Blob> => {
+    const res = await fetch(path, { headers: { 'X-Gnito-Session': SESSION_TOKEN || '', 'X-Gnito-CSRF': CSRF_TOKEN || '' } });
+    if (!res.ok) throw new Error(`Media request failed (${res.status})`);
+    return res.blob();
+  },
 
   /** Stream a chat response via SSE. Returns AbortController synchronously for cancellation. */
-  streamChat: (providerId: string, body: any, onChunk: (delta: string) => void, onEnd: (finalText: string) => void, onError: (msg: string) => void, incognito = false, onActivity?: (message: string) => void, onToolEvent?: (event: any) => void): AbortController => {
+  streamChat: (providerId: string, body: any, onChunk: (delta: string) => void, onEnd: (finalText: string) => void, onError: (msg: string) => void, incognito = false, onActivity?: (message: string) => void, onToolEvent?: (event: any) => void, onMediaEvent?: (event: any) => void): AbortController => {
     const controller = new AbortController();
     let finalText = '';
 
@@ -102,6 +107,8 @@ export const api = {
               try { onActivity?.(JSON.parse(data).message || ''); } catch {}
             } else if (name === 'tool-start' || name === 'tool-output' || name === 'tool-end') {
               try { onToolEvent?.(JSON.parse(data)); } catch {}
+            } else if (name === 'media') {
+              try { onMediaEvent?.(JSON.parse(data)); } catch {}
             } else if (name === 'error') {
               try { onError(JSON.parse(data).message || 'Unknown error'); } catch { onError('Unknown error'); }
               return;

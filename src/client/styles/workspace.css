@@ -330,6 +330,23 @@ button, input, textarea, select { font: inherit; }
 .composer-model-selector { gap: 7px; }
 .composer-model-selector .select, .composer-model-selector .input { border-radius: 10px; background-color: var(--color-surface); }
 .composer-meta { font-size: 10px; }
+.composer-attach { width: 40px; height: 42px; flex: 0 0 40px; border-radius: 12px; color: var(--color-text-muted); }
+.composer-attach:hover:not(:disabled) { background: var(--color-neutral-hover); color: var(--color-primary); }
+.composer-attach:disabled { opacity: .45; cursor: not-allowed; }
+.composer-attachments { display: flex; flex-wrap: wrap; gap: 7px; padding: 2px 5px 1px; }
+.composer-attachment { display: flex; align-items: center; gap: 7px; max-width: min(280px, 100%); padding: 5px 7px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); font-size: 11px; }
+.composer-attachment > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-attachment small { color: var(--color-text-faint); white-space: nowrap; }
+.composer-attachment-hint { flex-basis: 100%; margin: 1px 2px 0; color: var(--color-text-faint); font-size: 10px; white-space: normal; }
+.composer-attachment img { width: 25px; height: 25px; object-fit: cover; border-radius: 5px; }
+.composer-attachment .btn-icon { width: 24px; height: 24px; flex: 0 0 auto; border-radius: 7px; color: var(--color-text-muted); }
+.video-tip { display: block; width: 100%; margin-top: 3px; color: var(--color-text-faint); line-height: 1.5; }
+.video-tip a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
+.chat-media-figure { display: grid; justify-items: start; gap: 8px; margin: 12px 0; }
+.chat-media-image, .chat-media-video { display: block; max-width: min(100%, 760px); max-height: 560px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface-offset); object-fit: contain; }
+.chat-media-video { width: min(100%, 760px); }
+.chat-media-figure figcaption { display: flex; gap: 8px; }
+.chat-media-figure figcaption .btn { display: inline-flex; align-items: center; gap: 6px; }
 
 .card {
   border-radius: 16px;
@@ -389,6 +406,7 @@ button, input, textarea, select { font: inherit; }
   .chat-header { margin: -18px -16px 22px; padding: 15px 16px 13px; }
   .composer { padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
   .composer-actions { gap: 7px; }
+  .composer-attachment { max-width: calc(100vw - 48px); }
   .terminal-options { align-items: flex-start; flex-direction: column; }
   .settings-layout { padding: 16px 12px 25px; gap: 15px; }
   .settings-nav { border-radius: 13px; }

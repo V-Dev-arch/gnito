@@ -315,7 +315,10 @@ export async function executeAgentTerminal(input: unknown, options: {
   if (!tool) throw new Error('Terminal tool is unavailable.');
   const parsed = tool.inputSchema.safeParse(input);
   if (!parsed.success) throw new Error(`Terminal tool arguments are invalid: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
-  const value = parsed.data as { command: string; timeoutMs: number; networkAccess: boolean };
+  const requested = parsed.data as { command: string; timeoutMs: number; networkAccess: boolean };
+  // The chat-level opt-in is authoritative. Models often omit a secondary
+  // networkAccess argument even when the user has enabled Network in the UI.
+  const value = { ...requested, networkAccess: options.allowNetwork };
   const runId = randomUUID();
   const startedAt = Date.now();
   const context = options.chatId.slice(0, 200);

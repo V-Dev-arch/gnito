@@ -47,13 +47,25 @@ beforeAll(async () => {
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url?.includes('/images/generations')) {
+      res.end(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
+      return;
+    }
     if (!body.messages.some((message: any) => message.role === 'tool')) {
-      expect(body.tools?.[0]?.function?.name).toBe('terminal_run');
       expect(body.tool_choice).toBe('auto');
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'tool-call-1', type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd && ls -la', timeoutMs: 1000, networkAccess: false }) } }] } }] }));
+      const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'generate_image');
+      const tool = imageTool ? 'generate_image' : 'terminal_run';
+      expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
+      const args = imageTool ? { prompt: 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la', timeoutMs: 1000, networkAccess: false };
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
-      expect(body.messages.some((message: any) => message.role === 'tool' && message.tool_call_id === 'tool-call-1')).toBe(true);
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'The sandbox reported its Docker runtime status.' } }] }));
+      const toolMessage = body.messages.find((message: any) => message.role === 'tool');
+      expect(toolMessage).toBeTruthy();
+      const imageTool = toolMessage.tool_call_id === 'tool-call-generate_image';
+      if (imageTool) expect(toolMessage.content).toContain('/api/media/');
+      else expect(toolMessage.tool_call_id).toBe('tool-call-terminal_run');
+      const finalText = imageTool ? JSON.parse(toolMessage.content).output.markdown : 'The sandbox reported its Docker runtime status.';
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: finalText } }] }));
     }
   });
   await new Promise<void>(resolve => openAiServer.listen(0, '127.0.0.1', resolve));
@@ -113,6 +125,26 @@ describe('autonomous terminal tool loop', () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ message: 'Enable terminal access before granting terminal network access.' });
+  });
+
+  it('exposes image generation only when opted in and emits a local media event with a final Markdown link', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock Images provider', baseUrl: openAiUrl, enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
+      messages: [{ role: 'user', content: 'Create a test image.' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(stream).toContain('event: media');
+    expect(stream).toContain('/api/media/');
+    expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
+    const mediaPath = stream.match(/\/api\/media\/[0-9a-f-]+/i)?.[0];
+    expect(mediaPath).toBeTruthy();
+    const preview = await nativeFetch(`${baseUrl}${mediaPath}`, { headers: { 'X-Gnito-Session': session.token, 'X-Gnito-CSRF': session.csrf } });
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get('content-type')).toContain('image/png');
+    const blocked = await nativeFetch(`${baseUrl}${mediaPath}`);
+    expect(blocked.status).toBe(401);
   });
 
   it('routes Manus through the documented async task API and returns real status/final task text', async () => {

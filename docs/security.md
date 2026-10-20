@@ -14,6 +14,7 @@
 | Wrong/corrupt backup archive | AES-256-GCM auth-tag check fails with 400 `wrong-password` |
 | Local-network exposure | Binds `127.0.0.1` by default |
 | SSRF via search or URL reading | Rejects private, loopback, link-local, unspecified, mapped and special-use IP ranges; validates every DNS answer and pins it for the outbound connection; response sizes are capped and redirects are not followed |
+| Arbitrary sandbox file downloads | Media previews accept only known image/video types whose resolved path stays inside the dedicated `/workspace`; other files are not served |
 
 ## Deliberate network deployments
 
@@ -61,6 +62,10 @@ explicit user approval step before execution:
   HTTPS endpoint is used on its own. Private/local DNS answers and redirects are
   blocked; fetched snippets are treated as untrusted data by the model. `read_url`
   applies the same outbound-address policy.
+- Image generation runs only after the user enables **Image tools** and uses
+  the configured OpenAI-compatible provider's Images API; provider charges may
+  apply. Returned PNGs are stored locally in `generated-media/` and require the
+  authenticated API session to view or download.
 
 ## Terminal + sandbox
 
@@ -69,10 +74,13 @@ no network, a read-only root filesystem, dropped capabilities,
 `no-new-privileges`, resource limits, and a single read/write mount for the
 dedicated `sandbox-workspace` directory. The server refuses to run Terminal
 when Gnito itself is running as root. A host-side watchdog caps the persistent
-workspace at 256 MiB and preserves 128 MiB of free disk space; this is a
+workspace at 1 GiB and preserves 512 MiB of free disk space; this is a
 periodic software monitor rather than a kernel-enforced filesystem quota, so
-brief write overshoot is possible. The container receives a minimal
-environment; it does not receive provider keys, the Docker socket, the Gnito
+brief write overshoot is possible. With the per-message Network toggle enabled,
+Docker bridge networking is granted automatically to terminal commands in that
+turn; without it, containers remain on `--network=none`. The image includes
+`ffmpeg` and CA certificates for video rendering and HTTPS downloads. The
+container receives a minimal environment; it does not receive provider keys, the Docker socket, the Gnito
 data directory, or other host paths. The host shell is never used as fallback.
 Commands can still modify or delete anything inside the mounted workspace, so
 review the exact command before approving it.
