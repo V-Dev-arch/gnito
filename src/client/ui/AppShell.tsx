@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff } from 'lucide-react';
+import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff, MessagesSquare } from 'lucide-react';
 import { api } from '../lib/api';
+import { MyChatsDialog } from '../features/chat/MyChatsDialog';
 
 interface Props {
   children: React.ReactNode;
@@ -23,15 +24,15 @@ const NAV = [
 ];
 
 export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }: Props) {
-  const [location] = useLocation();
-  const [recentChats, setRecentChats] = useState<{ id: string; title: string }[]>([]);
-  const [collapsed, setCollapsed] = useState(false);
+  const [location, setLocation] = useLocation();
+  const [myChatsOpen, setMyChatsOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   const sidebarRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const myChatsButtonRef = useRef<HTMLButtonElement>(null);
   const previousLocationRef = useRef(location);
   const mobileOpenRef = useRef(mobileOpen);
   mobileOpenRef.current = mobileOpen;
@@ -43,6 +44,10 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
     setMobileOpen(false);
     window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
   }, []);
+  const closeMyChats = useCallback(() => {
+    setMyChatsOpen(false);
+    window.requestAnimationFrame(() => (isMobile ? mobileMenuButtonRef.current : myChatsButtonRef.current)?.focus());
+  }, [isMobile]);
   const trapMobileFocus = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     if (!isMobile || !mobileOpen || event.key !== 'Tab') return;
     const selector = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
@@ -70,9 +75,6 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
   }, []);
   useEffect(() => {
     let alive = true;
-    api.get('/api/chats?status=active').then((chats: { id: string; title: string }[]) => {
-      if (alive) setRecentChats(chats.slice(0, 8));
-    }).catch(() => { if (alive) setRecentChats([]); });
     api.get('/api/health').then(() => { if (alive) setRuntimeStatus('online'); }).catch(() => { if (alive) setRuntimeStatus('offline'); });
     return () => { alive = false; };
   }, [location]);
@@ -89,12 +91,12 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
 
   const shellClass = [
     'app-shell',
-    collapsed ? 'sidebar-collapsed' : '',
     isMobile ? 'mobile' : '',
   ].filter(Boolean).join(' ');
 
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
   const pageTitle = location.startsWith('/incognito') ? 'Incognito chat' : location.startsWith('/chats') ? 'Chat' : NAV.find(n => n.to !== '/' && location.startsWith(n.to))?.label || 'Gnito';
+  const currentChatId = location.startsWith('/chats/') ? location.slice('/chats/'.length).split('/')[0] : undefined;
 
   return (
     <div className={shellClass}>
@@ -114,16 +116,16 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
               <span className="sidebar-tagline">Your AI. Your Machine. Your Rules.</span>
             </span>
           </Link>
-          <button
+          {isMobile && <button
             className="btn btn-ghost btn-icon"
-            onClick={() => isMobile ? closeMobileMenu() : setCollapsed(c => !c)}
-            aria-label={isMobile ? 'Close menu' : (collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
-            aria-expanded={isMobile ? mobileOpen : !collapsed}
+            onClick={closeMobileMenu}
+            aria-label="Close menu"
+            aria-expanded={mobileOpen}
             aria-controls="primary-navigation"
             data-testid="button-sidebar-toggle"
           >
-            {isMobile ? <X size={18} /> : <Menu size={18} />}
-          </button>
+            <X size={18} />
+          </button>}
         </div>
 
         <div className="sidebar-section">
@@ -157,19 +159,11 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
                 </Link>
               );
             })}
+            <button ref={myChatsButtonRef} className="sidebar-link" onClick={() => { setMyChatsOpen(true); if (isMobile) closeMobileMenu(); }} data-testid="button-my-chats">
+              <MessagesSquare size={18} /><span className="sidebar-label">My Chats</span>
+            </button>
           </div>
         </nav>
-
-        <section className="sidebar-section recent-chats" aria-label="Recent conversations">
-          <div className="sidebar-section-title sidebar-label">Recent</div>
-          <div className="sidebar-nav">
-            {recentChats.map(chat => (
-              <Link key={chat.id} href={`/chats/${chat.id}`} className={`sidebar-link sidebar-chat-link ${location === `/chats/${chat.id}` ? 'active' : ''}`} onClick={() => setMobileOpen(false)} title={chat.title}>
-                <MessageSquare size={16} /><span className="sidebar-label">{chat.title}</span>
-              </Link>
-            ))}
-          </div>
-        </section>
 
         <div className="sidebar-footer">
           <div className="sidebar-env-status">
@@ -200,7 +194,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
       <main
         className="app-main"
         ref={mainRef}
-        style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', flex: 1 }}
+        style={{ minHeight: 0, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', flex: 1 }}
         aria-hidden={isMobile && mobileOpen}
       >
         {isMobile && !mobileOpen && (
@@ -227,6 +221,12 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
         )}
         {children}
       </main>
+      <MyChatsDialog
+        open={myChatsOpen}
+        currentChatId={currentChatId}
+        onClose={closeMyChats}
+        onDeleted={chatId => { if (currentChatId === chatId) setLocation('/'); }}
+      />
     </div>
   );
 }

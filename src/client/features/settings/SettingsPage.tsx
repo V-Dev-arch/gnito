@@ -303,7 +303,7 @@ export function SettingsPage() {
           <div className="card">
             <div className="card-title">Web search backend</div>
             <div className="card-description">
-              Leave this blank to use Brave Search; if it is rate-limited or challenged, Gnito tries DuckDuckGo once. This fallback sends the query to DuckDuckGo. You can set a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Gnito accepts HTML or SearXNG JSON; snippets are treated as untrusted content.
+              Leave this blank to use Brave Search. Gnito no longer retries through DuckDuckGo. CAPTCHA and anti-bot challenge pages are discarded and never sent to the model. If Brave is unavailable, try again later or configure a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Search snippets are treated as untrusted content.
             </div>
             <div className="field">
               <label className="label" htmlFor="search-backend">Search endpoint URL</label>
@@ -311,7 +311,7 @@ export function SettingsPage() {
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button className="btn btn-primary" onClick={() => void saveSearchBackend()} data-testid="button-save-search-backend">Save endpoint</button>
-              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use default search providers</button>
+              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use default Brave Search</button>
             </div>
           </div>
         )}

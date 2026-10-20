@@ -44,8 +44,19 @@ export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 // --- web_search ---------------------------------------------------------
 const DEFAULT_SEARCH_TARGETS = [
   { label: 'Brave Search', url: 'https://search.brave.com/search' },
-  { label: 'DuckDuckGo', url: 'https://html.duckduckgo.com/html/' },
 ] as const;
+const SEARCH_ATTEMPT_TIMEOUT_MS = 7_000;
+const SEARCH_ROUTE_TIMEOUT_MS = 18_000;
+
+function isBuiltInSearchBackend(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return (host === 'search.brave.com' && /^\/search\/?$/.test(url.pathname))
+      || (host === 'html.duckduckgo.com' && /^\/html\/?$/.test(url.pathname))
+      || (host === 'lite.duckduckgo.com' && /^\/lite\/?$/.test(url.pathname));
+  } catch { return false; }
+}
 
 export async function executeWebSearch(
   input: { query: string; maxResults: number },
@@ -54,7 +65,10 @@ export async function executeWebSearch(
 ): Promise<{ output?: any; error?: string }> {
   const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
   const configuredBackend = typeof backend?.value === 'string' ? backend.value.trim() : '';
-  const targets = configuredBackend
+  // Treat saved legacy/default URLs as built-in so DuckDuckGo settings from
+  // older versions no longer send requests to its CAPTCHA-prone HTML pages.
+  const usesDefaultProviders = !configuredBackend || isBuiltInSearchBackend(configuredBackend);
+  const targets = !usesDefaultProviders
     ? [{ label: 'Configured search backend', url: configuredBackend }]
     : [...DEFAULT_SEARCH_TARGETS];
   const failures: string[] = [];
@@ -67,21 +81,29 @@ export async function executeWebSearch(
         return { error: 'Search backend must be a public HTTPS URL without embedded credentials or a fragment.' };
       }
       target.searchParams.set('q', input.query);
-      if (configuredBackend && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
+      if (!usesDefaultProviders && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
       const resp = await fetcher(target, {
         signal,
-        timeoutMs: 10_000,
+        timeoutMs: SEARCH_ATTEMPT_TIMEOUT_MS,
         maxBytes: 1_000_000,
-        headers: { 'User-Agent': 'Gnito/0.1 (local-first AI workspace)', Accept: 'text/html, application/json' },
+        headers: {
+          'User-Agent': 'Gnito/0.1 (local-first AI workspace)',
+          Accept: 'text/html, application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
       });
       if (resp.status !== 200) {
         const retryAfter = resp.headers.get('retry-after')?.slice(0, 80);
         failures.push(`${label} returned HTTP ${resp.status}${retryAfter ? ` (Retry-After: ${retryAfter})` : ''}.`);
         if (index < targets.length - 1) continue;
-        return { error: searchFailureMessage(failures, !configuredBackend) };
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
       }
 
       const contentType = resp.headers.get('content-type') || '';
+      if (isSearchChallengePage(resp.body)) {
+        failures.push(`${label} returned an anti-bot or CAPTCHA challenge. The challenge page was discarded and was not sent to the model.`);
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
+      }
       const results = /application\/json/i.test(contentType)
         ? parseSearxResults(resp.body, target, input.maxResults)
         : /(^|\.)search\.brave\.com$/i.test(target.hostname)
@@ -92,7 +114,7 @@ export async function executeWebSearch(
       if (!results.length) {
         failures.push(`${label} returned no parseable results; it may have sent a challenge page or no results for this query.`);
         if (index < targets.length - 1) continue;
-        return { error: searchFailureMessage(failures, !configuredBackend) };
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
       }
       return { output: { query: input.query, results } };
     } catch (error: any) {
@@ -103,22 +125,26 @@ export async function executeWebSearch(
         : 'request failed.';
       failures.push(`${label}: ${detail}`);
       if (index < targets.length - 1) continue;
-      return { error: searchFailureMessage(failures, !configuredBackend) };
+      return { error: searchFailureMessage(failures, usesDefaultProviders) };
     }
   }
 
-  return { error: searchFailureMessage(failures, !configuredBackend) };
+  return { error: searchFailureMessage(failures, usesDefaultProviders) };
 }
 
 function searchFailureMessage(failures: string[], usedDefaultProviders: boolean): string {
   const source = failures.join(' ');
-  const providerState = usedDefaultProviders ? 'Both default search providers are unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
-  return `${source} ${providerState} Try again later or configure another public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
+  const providerState = usedDefaultProviders ? 'Brave Search is unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
+  return `${source} ${providerState} Try again later or configure a public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
+}
+
+function isSearchChallengePage(body: string): boolean {
+  return /<title[^>]*>[^<]*(?:captcha|verify (?:you|that)|unusual traffic|robot check|security check)[^<]*<\/title>|g-recaptcha|h-captcha|recaptcha\/api|cf-chl-|challenge-platform|verify you are human|unusual traffic from your (?:computer|network)|automated requests/i.test(body);
 }
 
 TOOL_REGISTRY.set('web_search', {
   name: 'web_search',
-  description: 'Search the public web via a configured provider, or Brave Search with one DuckDuckGo fallback when using the default.',
+  description: 'Search the public web via a configured provider, or Brave Search when using the default. Anti-bot/CAPTCHA pages are discarded and never sent to the model.',
   permissions: ['network:web-search'],
   requiresConfirmation: false,
   inputSchema: z.object({
@@ -529,7 +555,7 @@ export function registerToolRoutes(app: any): void {
     db.prepare('INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)')
       .run(runId, tool.name, JSON.stringify(parsed.data), 'running', startedAt, context);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const timer = setTimeout(() => controller.abort(), SEARCH_ROUTE_TIMEOUT_MS);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       const result = await tool.execute(parsed.data, controller.signal);
