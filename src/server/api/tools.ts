@@ -44,7 +44,6 @@ export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 // --- web_search ---------------------------------------------------------
 const DEFAULT_SEARCH_TARGETS = [
   { label: 'Brave Search', url: 'https://search.brave.com/search' },
-  { label: 'DuckDuckGo Lite', url: 'https://lite.duckduckgo.com/lite/' },
 ] as const;
 const SEARCH_ATTEMPT_TIMEOUT_MS = 7_000;
 const SEARCH_ROUTE_TIMEOUT_MS = 18_000;
@@ -66,8 +65,8 @@ export async function executeWebSearch(
 ): Promise<{ output?: any; error?: string }> {
   const backend = db.prepare("SELECT value FROM settings WHERE key = 'workspace.searchBackend'").get() as any;
   const configuredBackend = typeof backend?.value === 'string' ? backend.value.trim() : '';
-  // Treat saved legacy/default URLs as the built-in provider set so old
-  // settings still get the working fallback after a Brave rate limit.
+  // Treat saved legacy/default URLs as built-in so DuckDuckGo settings from
+  // older versions no longer send requests to its CAPTCHA-prone HTML pages.
   const usesDefaultProviders = !configuredBackend || isBuiltInSearchBackend(configuredBackend);
   const targets = !usesDefaultProviders
     ? [{ label: 'Configured search backend', url: configuredBackend }]
@@ -101,12 +100,14 @@ export async function executeWebSearch(
       }
 
       const contentType = resp.headers.get('content-type') || '';
+      if (isSearchChallengePage(resp.body)) {
+        failures.push(`${label} returned an anti-bot or CAPTCHA challenge. The challenge page was discarded and was not sent to the model.`);
+        return { error: searchFailureMessage(failures, usesDefaultProviders) };
+      }
       const results = /application\/json/i.test(contentType)
         ? parseSearxResults(resp.body, target, input.maxResults)
         : /(^|\.)search\.brave\.com$/i.test(target.hostname)
           ? parseBraveResults(resp.body, target, input.maxResults)
-          : /(^|\.)lite\.duckduckgo\.com$/i.test(target.hostname)
-            ? parseDuckDuckGoLiteResults(resp.body, target, input.maxResults)
           : /(^|\.)bing\.com$/i.test(target.hostname)
             ? parseBingResults(resp.body, target, input.maxResults)
             : parseDuckDuckGoResults(resp.body, target, input.maxResults);
@@ -133,13 +134,17 @@ export async function executeWebSearch(
 
 function searchFailureMessage(failures: string[], usedDefaultProviders: boolean): string {
   const source = failures.join(' ');
-  const providerState = usedDefaultProviders ? 'Both default search providers are unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
-  return `${source} ${providerState} Try again later or configure another public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
+  const providerState = usedDefaultProviders ? 'Brave Search is unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
+  return `${source} ${providerState} Try again later or configure a public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
+}
+
+function isSearchChallengePage(body: string): boolean {
+  return /<title[^>]*>[^<]*(?:captcha|verify (?:you|that)|unusual traffic|robot check|security check)[^<]*<\/title>|g-recaptcha|h-captcha|recaptcha\/api|cf-chl-|challenge-platform|verify you are human|unusual traffic from your (?:computer|network)|automated requests/i.test(body);
 }
 
 TOOL_REGISTRY.set('web_search', {
   name: 'web_search',
-  description: 'Search the public web via a configured provider, or Brave Search with one DuckDuckGo Lite fallback when using the default.',
+  description: 'Search the public web via a configured provider, or Brave Search when using the default. Anti-bot/CAPTCHA pages are discarded and never sent to the model.',
   permissions: ['network:web-search'],
   requiresConfirmation: false,
   inputSchema: z.object({
@@ -508,22 +513,6 @@ export function parseDuckDuckGoResults(html: string, base: URL, maxResults: numb
     const title = stripHtml(match[0].replace(/^<a\b[^>]*>/i, '').replace(/<\/a>$/i, '')).slice(0, 250);
     const afterAnchor = html.slice(match.index + match[0].length, match.index + match[0].length + 2_000);
     const snippetHtml = afterAnchor.match(/<[^>]*class=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i)?.[1] || '';
-    results.push({ title: title || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
-  }
-  return results;
-}
-
-export function parseDuckDuckGoLiteResults(html: string, base: URL, maxResults: number): { title: string; url: string; snippet: string }[] {
-  const results: { title: string; url: string; snippet: string }[] = [];
-  const anchors = /<a\b(?=[^>]*\bclass=["'][^"']*\bresult-link\b[^"']*["'])[^>]*>[\s\S]*?<\/a>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = anchors.exec(html)) && results.length < maxResults) {
-    const href = match[0].match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2];
-    const url = href ? safeResultUrl(href, base) : null;
-    if (!url) continue;
-    const title = stripHtml(match[0].replace(/^<a\b[^>]*>/i, '').replace(/<\/a>$/i, '')).slice(0, 250);
-    const afterAnchor = html.slice(match.index + match[0].length, match.index + match[0].length + 2_000);
-    const snippetHtml = afterAnchor.match(/<td\b(?=[^>]*class=["'][^"']*\bresult-snippet\b[^"']*["'])[^>]*>([\s\S]*?)<\/td>/i)?.[1] || '';
     results.push({ title: title || url, url, snippet: stripHtml(snippetHtml).slice(0, 1_000) });
   }
   return results;

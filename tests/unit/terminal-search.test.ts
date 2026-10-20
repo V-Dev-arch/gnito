@@ -16,7 +16,6 @@ let executeWebSearch: any;
 let readUrl: any;
 let toolRegistry: Map<string, any>;
 let parseDuckDuckGoResults: any;
-let parseDuckDuckGoLiteResults: any;
 let parseBingResults: any;
 let parseBraveResults: any;
 let registerToolRoutes: any;
@@ -46,7 +45,6 @@ beforeAll(async () => {
   readUrl = tools.TOOL_REGISTRY.get('read_url');
   toolRegistry = tools.TOOL_REGISTRY;
   parseDuckDuckGoResults = tools.parseDuckDuckGoResults;
-  parseDuckDuckGoLiteResults = tools.parseDuckDuckGoLiteResults;
   parseBingResults = tools.parseBingResults;
   parseBraveResults = tools.parseBraveResults;
   registerToolRoutes = tools.registerToolRoutes;
@@ -166,42 +164,42 @@ describe('Web search', () => {
     expect(results).toEqual([{ title: 'Example & Title', url: 'https://example.com/docs', snippet: 'Helpful source snippet.' }]);
   });
 
-  it('parses DuckDuckGo Lite result links, redirect targets, and snippets', () => {
-    const html = `<tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Farticle&amp;rut=abc" class='result-link'>Current &amp; Useful Source</a></td></tr><tr><td class='result-snippet'>Helpful <b>source</b> detail.</td></tr>`;
-    const results = parseDuckDuckGoLiteResults(html, new URL('https://lite.duckduckgo.com/lite/'), 5);
-    expect(results).toEqual([{ title: 'Current & Useful Source', url: 'https://example.com/article', snippet: 'Helpful source detail.' }]);
-  });
-
-  it('falls back once from default Brave Search after a 429', async () => {
+  it('does not call DuckDuckGo after a default Brave Search 429', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const visited: string[] = [];
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
       visited.push(url.hostname);
-      if (url.hostname === 'search.brave.com') {
-        return { status: 429, headers: { get: name => name === 'retry-after' ? '30' : null }, body: 'rate limited' };
-      }
-      return {
-        status: 200,
-        headers: { get: name => name === 'content-type' ? 'text/html' : null },
-        body: `<a class='result-link' href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Farticle">Current source</a><td class='result-snippet'>A useful result.</td>`,
-      };
+      return { status: 429, headers: { get: name => name === 'retry-after' ? '30' : null }, body: 'private upstream body' };
     });
-    expect(visited).toEqual(['search.brave.com', 'lite.duckduckgo.com']);
-    expect(result.error).toBeUndefined();
-    expect(result.output.results).toEqual([{ title: 'Current source', url: 'https://example.com/article', snippet: 'A useful result.' }]);
+    expect(visited).toEqual(['search.brave.com']);
+    expect(result.error).toContain('HTTP 429');
+    expect(result.error).toContain('Try again later');
+    expect(result.error).not.toContain('private upstream body');
   });
 
-  it('keeps the built-in fallback when a legacy Brave default URL was saved', async () => {
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', ?)").run('https://search.brave.com/search');
+  it('replaces a legacy saved DuckDuckGo URL with Brave rather than requesting DuckDuckGo', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', ?)").run('https://lite.duckduckgo.com/lite/');
     const visited: string[] = [];
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
       visited.push(url.hostname);
-      if (url.hostname === 'search.brave.com') return { status: 429, headers: { get: () => null }, body: '' };
-      return { status: 200, headers: { get: name => name === 'content-type' ? 'text/html' : null }, body: `<a class='result-link' href="https://example.com/article">Saved default fallback</a>` };
+      return { status: 200, headers: { get: name => name === 'content-type' ? 'text/html' : null }, body: '<a href="https://example.com/docs"><div class="title search-snippet-title">Brave result</div></a>' };
     });
-    expect(visited).toEqual(['search.brave.com', 'lite.duckduckgo.com']);
+    expect(visited).toEqual(['search.brave.com']);
     expect(result.error).toBeUndefined();
-    expect(result.output.results[0].title).toBe('Saved default fallback');
+    expect(result.output.results[0].title).toBe('Brave result');
+  });
+
+  it('discards CAPTCHA challenge HTML and never returns its contents', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
+    const challenge = '<html><title>Security check - CAPTCHA</title><div class="g-recaptcha">secret challenge body</div></html>';
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async () => ({
+      status: 200,
+      headers: { get: name => name === 'content-type' ? 'text/html' : null },
+      body: challenge,
+    }));
+    expect(result.error).toContain('anti-bot or CAPTCHA challenge');
+    expect(result.error).toContain('was not sent to the model');
+    expect(result.error).not.toContain('secret challenge body');
   });
 
   it('reports an explicitly configured backend 429 and Retry-After without switching providers', async () => {
