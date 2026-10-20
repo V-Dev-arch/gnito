@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ModelInfo } from '../../../shared/types.js';
 import { PROVIDER_PRESETS, type ProviderPreset } from '../../../shared/providerPresets.js';
+import { supportsImageTools } from './providerCapabilities.js';
 import { api } from '../../lib/api.js';
 import { useToast } from '../../lib/toast.js';
 import { ProviderLogo } from '../../ui/ProviderLogo.js';
@@ -33,14 +34,6 @@ function sandboxUnavailableMessage(status: SandboxStatus): string {
   if (status.reason === 'sandbox-image-not-built') return 'Gnito sandbox image is not built; open Terminal for build instructions';
   if (status.reason === 'server-running-as-root') return 'Gnito is running as root; run it as a non-root user';
   return 'Docker sandbox is not ready; open Terminal for setup details';
-}
-
-function supportsImageTools(provider?: Provider): boolean {
-  if (!provider) return false;
-  const baseUrl = provider.baseUrl.replace(/\/+$/, '').toLowerCase();
-  const known = PROVIDER_PRESETS.find(preset => preset.baseUrl && baseUrl.startsWith(preset.baseUrl.replace(/\/+$/, '').toLowerCase()));
-  if (known) return known.id === 'openai';
-  return provider.kind === 'custom' || provider.kind === 'openai-compatible';
 }
 
 function readFileDataUrl(file: File, mimeType: string): Promise<string> {
@@ -242,6 +235,7 @@ export function ChatPage({ chatId, projectId }: Props) {
   const [chatInfo, setChatInfo] = useState<Chat | null>(null);
   const [activeChatId, setActiveChatId] = useState(chatId || '');
   const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const streamedTextRef = useRef('');
   const abortRef = useRef<AbortController | null>(null);
   const activeToolRunRef = useRef<string | null>(null);
   const agentEventsRef = useRef<Map<string, AgentToolEvent>>(new Map());
@@ -405,6 +399,7 @@ export function ChatPage({ chatId, projectId }: Props) {
     setStreaming(true);
     setSaving(true);
     setActivity('Saving your message…');
+    streamedTextRef.current = '';
     setStreamedText('');
     const displayContent = `${content}${filesToSend.length ? `${content ? '\n\n' : ''}Attached files: ${filesToSend.map(file => file.file.name).join(', ')}` : ''}`;
     const optimisticUser: Message = { id: `u-${Date.now()}`, role: 'user', content: displayContent, providerId: selectedProvider, modelId: activeModel };
@@ -469,6 +464,7 @@ export function ChatPage({ chatId, projectId }: Props) {
       { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider) },
       delta => {
         setActivity(`Generating with ${chosenProvider?.label || 'provider'} · ${activeModel}`);
+        streamedTextRef.current += delta;
         setStreamedText(text => text + delta);
       },
       finalText => {
@@ -479,11 +475,13 @@ export function ChatPage({ chatId, projectId }: Props) {
         if (!completeText) {
           setError('The provider ended the response without text. Check the model and provider API response.');
           setStreamedText('');
+          streamedTextRef.current = '';
           return;
         }
         const assistantMsg: Message = { id: `a-${Date.now()}`, role: 'assistant', content: completeText, providerId: selectedProvider, modelId: activeModel };
         setMessages(current => [...current, assistantMsg]);
         setStreamedText('');
+        streamedTextRef.current = '';
         setAttachments([]);
         setPendingMedia([]);
         api.post(`/api/chats/${cid}/messages`, { role: 'assistant', content: completeText, providerId: selectedProvider, modelId: activeModel })
@@ -493,6 +491,19 @@ export function ChatPage({ chatId, projectId }: Props) {
       message => {
         setStreaming(false);
         setActivity('');
+        const mediaMarkdown = generatedMediaRef.current.map(media => media.markdown).filter(Boolean);
+        const partialText = [streamedTextRef.current, ...mediaMarkdown.filter(markdown => !streamedTextRef.current.includes(markdown))].filter(Boolean).join('\n\n');
+        if (partialText) {
+          const content = `${partialText}\n\n_[Response interrupted before completion.]_`;
+          const partial: Message = { id: `a-partial-${Date.now()}`, role: 'assistant', content, providerId: selectedProvider, modelId: activeModel };
+          setMessages(current => [...current, partial]);
+          void api.post(`/api/chats/${cid}/messages`, { role: 'assistant', content, providerId: selectedProvider, modelId: activeModel })
+            .catch((e: Error) => setError(previous => `${previous || message} Partial response could not be saved: ${e.message}`));
+        }
+        setStreamedText('');
+        streamedTextRef.current = '';
+        setPendingMedia([]);
+        generatedMediaRef.current = [];
         setError(message);
       },
       false,
@@ -548,8 +559,9 @@ export function ChatPage({ chatId, projectId }: Props) {
     activeToolRunRef.current = null;
     setStreaming(false);
     setActivity('Generation stopped by you.');
-    if (streamedText) {
-      const content = `${streamedText}\n\n_[Generation stopped]_`;
+    const partialText = streamedTextRef.current;
+    if (partialText) {
+      const content = `${partialText}\n\n_[Generation stopped]_`;
       const partial: Message = { id: `a-${Date.now()}`, role: 'assistant', content, providerId: selectedProvider, modelId: activeModel };
       setMessages(current => [...current, partial]);
       if (activeChatId) {
@@ -558,6 +570,7 @@ export function ChatPage({ chatId, projectId }: Props) {
       }
     }
     setStreamedText('');
+    streamedTextRef.current = '';
   };
 
   const needsSetup = enabledProviders.length === 0;
@@ -652,7 +665,7 @@ export function ChatPage({ chatId, projectId }: Props) {
           <button type="button" className={`btn btn-sm ${searchWeb ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSearchWeb(value => !value)} disabled={streaming || saving || searching} aria-pressed={searchWeb} aria-label="Toggle web search" data-testid="button-web-search"><Globe size={14} /> Web search</button>
           <button type="button" className={`btn btn-sm ${terminalTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { const next = !terminalTools; setTerminalTools(next); if (!next) setTerminalNetwork(false); }} disabled={streaming || saving || searching || chosenProvider?.kind === 'manus-agent' || sandboxStatus?.available === false} aria-pressed={terminalTools} title={chosenProvider?.kind === 'manus-agent' ? 'Manus runs remotely and cannot access the local Gnito sandbox.' : sandboxStatus?.available === false ? sandboxUnavailableMessage(sandboxStatus) : 'Allow this provider to run commands in the isolated Gnito Docker workspace for this message.'} data-testid="button-terminal-tools"><Terminal size={14} /> {terminalTools ? 'Terminal allowed' : 'Allow terminal'}</button>
           <button type="button" className={`btn btn-sm ${terminalNetwork ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTerminalNetwork(value => !value)} disabled={!terminalTools || streaming || saving || searching || chosenProvider?.kind === 'manus-agent'} aria-pressed={terminalNetwork} title="Permit terminal commands to use Docker bridge networking for this message." data-testid="button-terminal-network"><Wifi size={14} /> Network {terminalNetwork ? 'on' : 'off'}</button>
-          <button type="button" className={`btn btn-sm ${imageTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setImageTools(value => !value)} disabled={streaming || saving || searching || !supportsImageTools(chosenProvider)} aria-pressed={imageTools} title={supportsImageTools(chosenProvider) ? 'Allow this provider’s Images API to generate images; provider charges may apply.' : 'Choose the OpenAI preset or a custom OpenAI-compatible provider with an Images API.'} data-testid="button-image-tools"><ImagePlus size={14} /> Image tools {imageTools ? 'on' : 'off'}</button>
+          <button type="button" className={`btn btn-sm ${imageTools ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setImageTools(value => !value)} disabled={streaming || saving || searching || !supportsImageTools(chosenProvider)} aria-pressed={imageTools} title={supportsImageTools(chosenProvider) ? 'Allow the selected OpenAI-compatible provider’s Images API to generate images; support and charges depend on that provider.' : 'Choose an OpenAI-compatible provider to enable image tools.'} data-testid="button-image-tools"><ImagePlus size={14} /> Image tools {imageTools ? 'on' : 'off'}</button>
           <div className="composer-model-selector">
             <select className="select" value={selectedProvider} onChange={e => setSelectedProvider(e.target.value)} aria-label="Provider" data-testid="select-provider">
               <option value="">Choose provider</option>{enabledProviders.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}

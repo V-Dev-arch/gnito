@@ -595,10 +595,10 @@ async function runOpenAIAgent(options: {
   let toolCount = 0;
   let imageCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
+    const { response, streamedText } = await postProviderChat(options.url, options.headers, {
       model: options.body.model,
       messages,
-      stream: false,
+      stream: true,
       temperature: options.body.temperature,
       max_tokens: options.body.maxTokens,
       tools: [
@@ -608,11 +608,11 @@ async function runOpenAIAgent(options: {
       tool_choice: round === 0 && options.forceImageGeneration
         ? { type: 'function', function: { name: 'generate_image' } }
         : 'auto',
-    }, options.signal);
+    }, options.signal, delta => options.send('chunk', { delta }));
     const message = response?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    if (!calls.length) return providerText(message.content);
+    if (!calls.length) return streamedText ? '' : providerText(message.content);
     messages.push(message);
     for (const call of calls) {
       const callId = String(call.id || randomUUID());
@@ -709,17 +709,18 @@ async function runAnthropicAgent(options: {
   const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) }));
   let toolCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
+    const { response, streamedText } = await postAnthropicChat(options.url, options.headers, {
       model: options.body.model,
       messages,
       system,
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
       tools: [ANTHROPIC_TERMINAL_TOOL],
-    }, options.signal);
+      stream: true,
+    }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
     const calls = blocks.filter((block: any) => block?.type === 'tool_use');
-    if (!calls.length) return blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
+    if (!calls.length) return streamedText ? '' : blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
     messages.push({ role: 'assistant', content: blocks });
     const toolResults = [];
     for (const call of calls) {
@@ -756,16 +757,158 @@ async function runAgentTerminal(input: unknown, options: {
   });
 }
 
-async function postProviderJson(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<any> {
+async function postProviderChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
   const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
     throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
   }
-  const text = await response.text();
-  if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
-  try { return JSON.parse(text); }
-  catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let assistantText = '';
+  let finishReason = '';
+  const calls = new Map<number, any>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.error) throw new Error(String(event.error.message || 'Provider streaming request failed.'));
+    const choice = event?.choices?.[0];
+    if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason;
+    const delta = choice?.delta;
+    if (typeof delta?.content === 'string' && delta.content) {
+      assistantText += delta.content;
+      if (assistantText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+      onTextDelta(delta.content);
+    }
+    if (!Array.isArray(delta?.tool_calls)) return;
+    for (const toolDelta of delta.tool_calls) {
+      const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : calls.size;
+      const call = calls.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } };
+      if (typeof toolDelta?.id === 'string') call.id = toolDelta.id;
+      if (typeof toolDelta?.type === 'string') call.type = toolDelta.type;
+      if (typeof toolDelta?.function?.name === 'string') call.function.name += toolDelta.function.name;
+      if (typeof toolDelta?.function?.arguments === 'string') call.function.arguments += toolDelta.function.arguments;
+      calls.set(index, call);
+    }
+  });
+  if (!sawDone && !finishReason) throw new Error('Provider stream ended before the response was complete.');
+
+  const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+  return {
+    response: { choices: [{ message: { role: 'assistant', content: assistantText || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) } }] },
+    streamedText: assistantText,
+  };
+}
+
+async function postAnthropicChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
+  }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let streamedText = '';
+  let stopReason: string | undefined;
+  let messageStopped = false;
+  const blocks = new Map<number, any>();
+  const partialInputs = new Map<number, string>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.type === 'error' || event?.error) throw new Error(String(event?.error?.message || 'Provider streaming request failed.'));
+    if (event?.type === 'message_stop') messageStopped = true;
+    if (event?.type === 'message_delta' && typeof event.delta?.stop_reason === 'string') stopReason = event.delta.stop_reason;
+    const index = Number.isInteger(event?.index) ? event.index : 0;
+    if (event?.type === 'content_block_start' && event.content_block && typeof event.content_block === 'object') {
+      blocks.set(index, { ...event.content_block });
+      return;
+    }
+    if (event?.type === 'content_block_delta') {
+      const block = blocks.get(index) || {};
+      if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+        block.text = `${block.text || ''}${event.delta.text}`;
+        streamedText += event.delta.text;
+        if (streamedText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+        onTextDelta(event.delta.text);
+      } else if (event.delta?.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
+        partialInputs.set(index, `${partialInputs.get(index) || ''}${event.delta.partial_json}`);
+      }
+      blocks.set(index, block);
+      return;
+    }
+    if (event?.type === 'content_block_stop') {
+      const partial = partialInputs.get(index);
+      if (partial) {
+        try { (blocks.get(index) || {}).input = JSON.parse(partial); }
+        catch { throw new Error('Provider returned invalid tool arguments in its streaming response.'); }
+        partialInputs.delete(index);
+      }
+    }
+  });
+  if (!sawDone && !messageStopped) throw new Error('Provider stream ended before the response was complete.');
+  return { response: { content: [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block), stop_reason: stopReason }, streamedText };
+}
+
+async function readProviderSse(response: { body: ReadableStream<Uint8Array> | null }, onEvent: (event: any) => void): Promise<boolean> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Provider returned an empty streaming response.');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let receivedBytes = 0;
+  let finished = false;
+  let sawDone = false;
+  const parseBlock = (block: string) => {
+    const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
+    if (!data) return;
+    if (data === '[DONE]') { finished = true; sawDone = true; return; }
+    try { onEvent(JSON.parse(data)); }
+    catch (error: any) {
+      if (error instanceof SyntaxError) throw new Error('Provider returned invalid JSON in its streaming response.');
+      throw error;
+    }
+  };
+  try {
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > 2_000_000) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Provider response exceeded the 2 MB limit.');
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        parseBlock(block);
+        if (finished) break;
+      }
+    }
+    if (!finished) buffer += decoder.decode();
+    if (!finished && buffer.trim()) parseBlock(buffer);
+    return sawDone;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function providerText(content: unknown): string {

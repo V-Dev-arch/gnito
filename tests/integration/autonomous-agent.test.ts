@@ -22,6 +22,7 @@ let apiServer: any;
 let baseUrl = '';
 let openAiServer: any;
 let openAiUrl = '';
+const openAiRequests: any[] = [];
 let manusCalls: string[] = [];
 
 type TestSession = { token: string; csrf: string };
@@ -46,6 +47,24 @@ beforeAll(async () => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    openAiRequests.push(body);
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Incremental stream test')) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Visible immediately.' } }] })}\n\n`);
+      setTimeout(() => {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ' Final streamed text.' } }] })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      }, 120);
+      return;
+    }
+    if (Array.isArray(body.messages) && !body.messages.some((message: any) => message.role === 'tool') && body.messages.some((message: any) => message.role === 'user' && message.content === 'Stream a terminal tool call')) {
+      const argumentsJson = JSON.stringify({ command: 'pwd' });
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'tool-call-terminal_run', type: 'function', function: { name: 'terminal_run', arguments: argumentsJson.slice(0, 8) } }] } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: argumentsJson.slice(8) } }] }, finish_reason: 'tool_calls' }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (req.url?.includes('/images/generations')) {
       res.end(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
@@ -100,6 +119,43 @@ async function sendChat(providerId: string, payload: Record<string, unknown>) {
 }
 
 describe('autonomous terminal tool loop', () => {
+  it('streams assistant text immediately when terminal tools are available but unused', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock streaming provider', baseUrl: openAiUrl, enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: true, allowNetwork: false,
+      messages: [{ role: 'user', content: 'Incremental stream test' }],
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('Visible immediately.');
+    let rest = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      rest += new TextDecoder().decode(chunk.value);
+    }
+    expect(rest).toContain('Final streamed text.');
+    expect(rest).toContain('event: end');
+  });
+
+  it('assembles streamed tool-call deltas before executing and sends the tool result in the next provider turn', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock streamed-tool provider', baseUrl: openAiUrl, enabled: true });
+    const requestStart = openAiRequests.length;
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: true, allowNetwork: false,
+      messages: [{ role: 'user', content: 'Stream a terminal tool call' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(stream).toContain('event: tool-start');
+    expect(stream).toContain('event: tool-end');
+    expect(stream).toContain('The sandbox reported its Docker runtime status.');
+    const followup = openAiRequests.slice(requestStart).find(body => body.messages.some((message: any) => message.role === 'tool'));
+    const assistantCall = followup.messages.find((message: any) => message.role === 'assistant' && message.tool_calls);
+    expect(assistantCall.tool_calls[0]).toMatchObject({ id: 'tool-call-terminal_run', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } });
+  });
+
   it('runs the model-directed tool only after per-message permission and records its exact command/result', async () => {
     const providerId = await createProvider({ kind: 'custom', label: 'Mock tool provider', baseUrl: openAiUrl, enabled: true });
     const response = await sendChat(providerId, {
@@ -130,7 +186,7 @@ describe('autonomous terminal tool loop', () => {
   });
 
   it('exposes image generation only when opted in and emits a local media event with a final Markdown link', async () => {
-    const providerId = await createProvider({ kind: 'custom', label: 'Mock Images provider', baseUrl: openAiUrl, enabled: true });
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock Images provider', baseUrl: openAiUrl, apiKey: 'test-openai-key', enabled: true });
     const response = await sendChat(providerId, {
       model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
       messages: [{ role: 'user', content: 'Create a test image.' }],
