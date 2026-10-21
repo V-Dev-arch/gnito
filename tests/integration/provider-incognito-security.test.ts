@@ -83,6 +83,41 @@ describe('provider response safety', () => {
     });
   });
 
+  it('sends required Anthropic max_tokens and omits an empty system prompt for regular chat', async () => {
+    let requestBody: any;
+    const upstream = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Anthropic reply.' } })}\n\n`);
+      res.end(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    try {
+      await withServer(app, async baseUrl => {
+        const createdResponse = await fetch(`${baseUrl}/api/providers`, {
+          method: 'POST', headers: headers(session, true),
+          body: JSON.stringify({ ...createProviderPayload(`http://127.0.0.1:${upstreamPort}/v1`, 'anthropic-compatible'), customHeaders: {}, apiKey: 'test-anthropic-key' }),
+        });
+        expect(createdResponse.status).toBe(201);
+        const { id } = await createdResponse.json() as { id: string };
+        const response = await fetch(`${baseUrl}/api/providers/${id}/chat`, {
+          method: 'POST', headers: headers(session, true),
+          body: JSON.stringify({ model: 'claude-test', messages: [{ role: 'user', content: 'Hello.' }] }),
+        });
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain('Anthropic reply.');
+        expect(requestBody.max_tokens).toBe(4096);
+        expect(requestBody).not.toHaveProperty('system');
+      });
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it('identifies upstream 429s from the tool-enabled provider path without exposing the response body', async () => {
     const upstream = createServer((_req, res) => {
       res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '30' });
@@ -108,6 +143,88 @@ describe('provider response safety', () => {
         expect(response.status).toBe(200);
         expect(events).toContain('Tool-enabled chat request failed (HTTP 429: the provider rate limit was reached)');
         expect(events).not.toContain('UPSTREAM_PRIVATE_RATE_LIMIT_BODY');
+      });
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('retries an HTTP 400 tool request once without streaming and retains the same tool permissions', async () => {
+    const requestBodies: any[] = [];
+    const upstream = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      requestBodies.push(body);
+      if (body.stream) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'This endpoint requires non-streaming tool calls.' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (body.messages.some((message: any) => message.role === 'tool')) {
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Recovered without streaming.' } }] }));
+      } else {
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'fallback-terminal-call', type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } }] } }] }));
+      }
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    try {
+      await withServer(app, async baseUrl => {
+        const createdResponse = await fetch(`${baseUrl}/api/providers`, {
+          method: 'POST', headers: headers(session, true), body: JSON.stringify(createProviderPayload(`http://127.0.0.1:${upstreamPort}/v1`)),
+        });
+        const { id } = await createdResponse.json() as { id: string };
+        const chatId = randomUUID();
+        getDb().prepare('INSERT INTO chats (id, project_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+          .run(chatId, null, 'Stream fallback test', 'active', Date.now(), Date.now());
+
+        const response = await fetch(`${baseUrl}/api/providers/${id}/chat`, {
+          method: 'POST', headers: headers(session, true),
+          body: JSON.stringify({ model: 'mock-model', messages: [{ role: 'user', content: 'Run pwd.' }], chatId, allowTerminal: true }),
+        });
+        const events = await response.text();
+        expect(response.status).toBe(200);
+        expect(events).toContain('event: tool-start');
+        expect(events).toContain('event: tool-end');
+        expect(events).toContain('Recovered without streaming.');
+        expect(requestBodies.map(body => body.stream)).toEqual([true, false, true, false]);
+        expect(requestBodies[0].tools).toEqual(requestBodies[1].tools);
+        expect(requestBodies[2].tools).toEqual(requestBodies[3].tools);
+      });
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('explains tool-enabled HTTP 400s without leaking arbitrary provider response bodies', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'PRIVATE_UPSTREAM_VALIDATION_DETAILS' } }));
+    });
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    try {
+      await withServer(app, async baseUrl => {
+        const createdResponse = await fetch(`${baseUrl}/api/providers`, {
+          method: 'POST', headers: headers(session, true), body: JSON.stringify(createProviderPayload(`http://127.0.0.1:${upstreamPort}/v1`)),
+        });
+        const { id } = await createdResponse.json() as { id: string };
+        const chatId = randomUUID();
+        getDb().prepare('INSERT INTO chats (id, project_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+          .run(chatId, null, 'Tool compatibility test', 'active', Date.now(), Date.now());
+
+        const response = await fetch(`${baseUrl}/api/providers/${id}/chat`, {
+          method: 'POST', headers: headers(session, true),
+          body: JSON.stringify({ model: 'mock-model', messages: [{ role: 'user', content: 'Run pwd.' }], chatId, allowTerminal: true }),
+        });
+        const events = await response.text();
+        expect(response.status).toBe(200);
+        expect(events).toContain('HTTP 400: the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible');
+        expect(events).not.toContain('PRIVATE_UPSTREAM_VALIDATION_DETAILS');
       });
     } finally {
       upstream.closeAllConnections();

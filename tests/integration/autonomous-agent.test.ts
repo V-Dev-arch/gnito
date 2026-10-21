@@ -76,7 +76,9 @@ beforeAll(async () => {
       else expect(body.tool_choice).toBe('auto');
       const tool = imageTool ? 'generate_image' : 'terminal_run';
       expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
-      if (!imageTool) expect(body.tools.find((entry: any) => entry.function?.name === 'terminal_run').function.parameters.properties.networkAccess).toBeUndefined();
+      const properties = body.tools.find((entry: any) => entry.function?.name === tool).function.parameters.properties;
+      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'model', 'size']);
+      else expect(Object.keys(properties)).toEqual(['command']);
       const args = imageTool ? { prompt: 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {

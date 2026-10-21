@@ -301,27 +301,27 @@ export function registerProviderRoutes(app: any): void {
         return;
       }
 
+      const anthropicSystemPrompt = providerText(body.messages.find(message => message.role === 'system')?.content);
+      const providerRequestBody = row.kind === 'anthropic-compatible'
+        ? {
+            model: body.model,
+            messages: body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) })),
+            ...(anthropicSystemPrompt ? { system: anthropicSystemPrompt } : {}),
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens ?? 4096,
+          }
+        : {
+            model: body.model,
+            messages: body.messages,
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens,
+          };
       const resp = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(
-          row.kind === 'anthropic-compatible'
-            ? {
-                model: body.model,
-                messages: body.messages.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: toAnthropicContent(m.content) })),
-                system: providerText(body.messages.find(m => m.role === 'system')?.content),
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-            : {
-                model: body.model,
-                messages: body.messages,
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-        ),
+        body: JSON.stringify(providerRequestBody),
         signal: abortController.signal,
       });
 
@@ -537,12 +537,8 @@ const TERMINAL_TOOL = {
     description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
     parameters: {
       type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to run in /workspace.' },
-        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 180000 },
-      },
+      properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
       required: ['command'],
-      additionalProperties: false,
     },
   },
 };
@@ -552,10 +548,7 @@ const ANTHROPIC_TERMINAL_TOOL = {
   description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
   input_schema: {
     type: 'object',
-    properties: {
-      command: { type: 'string', description: 'Shell command to run in /workspace.' },
-      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 180000 },
-    },
+    properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
     required: ['command'],
   },
 };
@@ -570,12 +563,11 @@ const IMAGE_TOOL = {
     parameters: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', minLength: 1, maxLength: 2_000, description: 'Detailed visual description of the requested image.' },
-        model: { type: 'string', maxLength: 120, default: 'gpt-image-1', description: 'Image-generation model exposed by this provider; defaults to gpt-image-1.' },
-        size: { type: 'string', enum: ['1024x1024', '1536x1024', '1024x1536'], default: '1024x1024' },
+        prompt: { type: 'string', description: 'Detailed visual description of the requested image.' },
+        model: { type: 'string', description: 'Optional image model exposed by this provider; defaults to gpt-image-1.' },
+        size: { type: 'string', description: 'Optional size: 1024x1024, 1536x1024, or 1024x1536.' },
       },
       required: ['prompt'],
-      additionalProperties: false,
     },
   },
 };
@@ -764,7 +756,7 @@ async function postProviderChat(
   signal: AbortSignal,
   onTextDelta: (delta: string) => void,
 ): Promise<{ response: any; streamedText: string }> {
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
     throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
@@ -816,7 +808,7 @@ async function postAnthropicChat(
   signal: AbortSignal,
   onTextDelta: (delta: string) => void,
 ): Promise<{ response: any; streamedText: string }> {
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
     throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
@@ -868,7 +860,24 @@ async function postAnthropicChat(
   return { response: { content: [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block), stop_reason: stopReason }, streamedText };
 }
 
-async function readProviderSse(response: { body: ReadableStream<Uint8Array> | null }, onEvent: (event: any) => void): Promise<boolean> {
+type ProviderFetchResponse = Awaited<ReturnType<typeof fetch>>;
+
+async function fetchToolEnabledResponse(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<ProviderFetchResponse> {
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (response.status !== 400 || !body || typeof body !== 'object' || Array.isArray(body) || (body as any).stream !== true) return response;
+  // Some otherwise compatible providers reject SSE when tools are present. A 400 means the
+  // request was rejected before completion; retry once without stream, keeping the same tools
+  // and server-side permission gates. Providers that reject tool calling still return a useful 400.
+  void response.body?.cancel().catch(() => {});
+  return fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...(body as Record<string, unknown>), stream: false }),
+    signal,
+  });
+}
+
+async function readProviderSse(response: Pick<ProviderFetchResponse, 'body'>, onEvent: (event: any) => void): Promise<boolean> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Provider returned an empty streaming response.');
   const decoder = new TextDecoder();
@@ -972,6 +981,8 @@ function safeProviderStatusError(status: number, operation: string): string {
   const detail = status === 401 || status === 403 ? 'authentication was rejected'
     : status === 404 ? 'the endpoint was not found'
     : status === 429 ? 'the provider rate limit was reached'
+    : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible'
+    : status === 400 && operation === 'Image generation' ? 'the image endpoint rejected the request; check Images API support and the selected image model/size'
     : status === 400 ? 'the request was rejected; check the model ID and request settings'
     : status >= 500 ? 'the provider returned a server error'
     : 'the provider rejected the request';
