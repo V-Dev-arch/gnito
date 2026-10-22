@@ -61,4 +61,16 @@ describe('chat client SSE parsing', () => {
     expect(result.error).toContain('invalid text');
     expect(result.chunks).toEqual([]);
   });
+
+  it('shows validation paths for local HTTP 400 responses instead of the generic validation code', async () => {
+    setSession('test-session', 'test-csrf');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: 'validation',
+      issues: [{ path: ['messages', 0, 'content'], message: 'Invalid input' }],
+    }), { status: 400, headers: { 'content-type': 'application/json' } })));
+    const result = await new Promise<{ kind: 'end' | 'error'; error?: string }>(resolve => {
+      api.streamChat('provider', { model: 'test', messages: [] }, () => {}, () => resolve({ kind: 'end' }), error => resolve({ kind: 'error', error }));
+    });
+    expect(result).toEqual({ kind: 'error', error: 'Request validation failed: messages.0.content: Invalid input' });
+  });
 });

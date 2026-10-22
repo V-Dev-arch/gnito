@@ -327,7 +327,7 @@ export function registerProviderRoutes(app: any): void {
 
       if (!resp.ok) {
         void resp.body?.cancel().catch(() => {});
-        send('error', { message: safeProviderStatusError(resp.status, 'Chat request') });
+        send('error', { message: safeProviderStatusError(resp.status, imageParts.length ? 'Vision chat request' : 'Chat request') });
         send('end', {});
         res.end();
         return;
@@ -983,6 +983,7 @@ function safeProviderStatusError(status: number, operation: string): string {
     : status === 429 ? 'the provider rate limit was reached'
     : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible'
     : status === 400 && operation === 'Image generation' ? 'the image endpoint rejected the request; check Images API support and the selected image model/size'
+    : status === 400 && operation === 'Vision chat request' ? 'the provider rejected image input; choose a vision-capable model and supported image format'
     : status === 400 ? 'the request was rejected; check the model ID and request settings'
     : status >= 500 ? 'the provider returned a server error'
     : 'the provider rejected the request';

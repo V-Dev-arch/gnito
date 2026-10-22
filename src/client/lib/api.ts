@@ -5,6 +5,20 @@
 let SESSION_TOKEN: string | null = null;
 let CSRF_TOKEN: string | null = null;
 
+function describeHttpError(payload: any, status: number): string {
+  if (typeof payload?.message === 'string' && payload.message) return payload.message;
+  if (Array.isArray(payload?.issues)) {
+    const details = payload.issues.slice(0, 5).map((issue: any) => {
+      const path = Array.isArray(issue?.path) ? issue.path.filter((part: unknown) => typeof part === 'string' || typeof part === 'number').join('.') : '';
+      const message = typeof issue?.message === 'string' ? issue.message : '';
+      return [path || 'request', message].filter(Boolean).join(': ');
+    }).filter(Boolean).join('; ');
+    if (details) return `Request validation failed: ${details}`;
+  }
+  if (typeof payload?.error === 'string' && payload.error !== 'validation') return payload.error;
+  return `Request failed (${status})`;
+}
+
 export function setSession(token: string, csrf: string): void {
   SESSION_TOKEN = token;
   CSRF_TOKEN = csrf;
@@ -29,9 +43,9 @@ async function request<T = any>(method: string, path: string, body?: any): Promi
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let message = '';
-    try { const j = await res.json(); message = j.message || j.error || ''; } catch {}
-    throw new Error(message || `Request failed (${res.status})`);
+    let message = `Request failed (${res.status})`;
+    try { message = describeHttpError(await res.json(), res.status); } catch {}
+    throw new Error(message);
   }
   return res.json();
 }
@@ -80,17 +94,16 @@ export const api = {
           signal: controller.signal,
         });
         if (!res.ok) {
-          let message = '';
+          let message = `Request failed (${res.status})`;
           const contentType = res.headers.get('content-type') || '';
           if (contentType.includes('application/json')) {
             try {
-              const payload = await res.json();
-              message = payload.message || payload.error || '';
+              message = describeHttpError(await res.json(), res.status);
             } catch { /* use status below */ }
           } else {
-            message = (await res.text().catch(() => '')).slice(0, 600).trim();
+            message = (await res.text().catch(() => '')).slice(0, 600).trim() || message;
           }
-          fail(message || `Request failed (${res.status})`);
+          fail(message);
           return;
         }
         if (!res.body) {
