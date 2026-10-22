@@ -11,6 +11,7 @@ let closeDb: (() => void) | undefined;
 let getSandboxStatus: any;
 let runSandboxCommand: any;
 let buildDockerRunArgs: any;
+let openSandboxMediaFile: any;
 let webSearch: any;
 let executeWebSearch: any;
 let readUrl: any;
@@ -19,6 +20,9 @@ let parseDuckDuckGoResults: any;
 let parseBingResults: any;
 let parseBraveResults: any;
 let registerToolRoutes: any;
+let executeAgentTerminal: any;
+let storeGeneratedPng: any;
+let registerMediaRoutes: any;
 let db: any;
 let nativeFetch: typeof fetch;
 let server: any;
@@ -39,6 +43,7 @@ beforeAll(async () => {
   getSandboxStatus = sandbox.getSandboxStatus;
   runSandboxCommand = sandbox.runSandboxCommand;
   buildDockerRunArgs = sandbox.buildDockerRunArgs;
+  openSandboxMediaFile = sandbox.openSandboxMediaFile;
   const tools = await import('../../src/server/api/tools.js');
   webSearch = tools.TOOL_REGISTRY.get('web_search');
   executeWebSearch = tools.executeWebSearch;
@@ -48,10 +53,15 @@ beforeAll(async () => {
   parseBingResults = tools.parseBingResults;
   parseBraveResults = tools.parseBraveResults;
   registerToolRoutes = tools.registerToolRoutes;
+  executeAgentTerminal = tools.executeAgentTerminal;
+  const media = await import('../../src/server/api/media.js');
+  storeGeneratedPng = media.storeGeneratedPng;
+  registerMediaRoutes = media.registerMediaRoutes;
   const express = (await import('express')).default;
   const app = express();
   app.use(express.json());
   registerToolRoutes(app);
+  registerMediaRoutes(app);
   server = await new Promise<any>(resolve => {
     const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
   });
@@ -108,7 +118,7 @@ describe('Docker terminal sandbox', () => {
     expect(args).toContain('--pids-limit=64');
     expect(args).toContain('--memory=512m');
     expect(args).toContain('--cpus=1');
-    expect(args).toContain('fsize=134217728:134217728');
+    expect(args).toContain('fsize=1073741824:1073741824');
     expect(args).toContain('--pull=never');
     expect(args).toContain('--init');
     expect(args).toContain('type=bind,source=/tmp/gnito-workspace,target=/workspace');
@@ -122,6 +132,81 @@ describe('Docker terminal sandbox', () => {
   it('uses Docker bridge networking only when network access is explicitly enabled', () => {
     const args = buildDockerRunArgs({ command: 'curl https://example.com', containerName: 'gnito-terminal-network-test', workspaceDir: '/tmp/gnito-workspace', uid: 1000, gid: 1000, networkAccess: true });
     expect(args).toContain('--network=bridge');
+  });
+
+  it('applies the message-level network grant without relying on a second model-supplied flag', async () => {
+    const terminalTool = toolRegistry.get('terminal_run');
+    const originalExecute = terminalTool.execute;
+    terminalTool.execute = async (input: any) => ({ output: { exitCode: 0, stdout: String(input.networkAccess), stderr: '' } });
+    try {
+      const granted = await executeAgentTerminal({ command: 'curl https://example.com', timeoutMs: 1_000, networkAccess: false }, {
+        chatId: 'network-granted-test', allowNetwork: true, signal: new AbortController().signal,
+      });
+      const grantedRow = db.prepare('SELECT input FROM tool_runs WHERE id = ? LIMIT 1').get(granted.runId) as any;
+      expect(JSON.parse(grantedRow.input).networkAccess).toBe(true);
+      expect(granted.output.stdout).toBe('true');
+
+      const denied = await executeAgentTerminal({ command: 'curl https://example.com', timeoutMs: 1_000, networkAccess: true }, {
+        chatId: 'network-denied-test', allowNetwork: false, signal: new AbortController().signal,
+      });
+      const deniedRow = db.prepare('SELECT input FROM tool_runs WHERE id = ? LIMIT 1').get(denied.runId) as any;
+      expect(JSON.parse(deniedRow.input).networkAccess).toBe(false);
+      expect(denied.output.stdout).toBe('false');
+    } finally { terminalTool.execute = originalExecute; }
+  });
+
+  it('serves generated PNGs inline and as downloads through the authenticated media route', async () => {
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==';
+    const media = storeGeneratedPng(png);
+    const inline = await nativeFetch(`${apiBase}${media.url}`);
+    expect(inline.status).toBe(200);
+    expect(inline.headers.get('content-type')).toContain('image/png');
+    expect(inline.headers.get('content-disposition')).toContain('inline');
+    const download = await nativeFetch(`${apiBase}${media.url}?download=1`);
+    expect(download.status).toBe(200);
+    expect(download.headers.get('content-disposition')).toContain('attachment');
+    const generatedDir = path.join(tempDir, 'generated-media');
+    fs.writeFileSync(path.join(tempDir, 'outside.png'), Buffer.from(png, 'base64'));
+    const escapedId = '123e4567-e89b-42d3-a456-426614174000';
+    fs.symlinkSync(path.join(tempDir, 'outside.png'), path.join(generatedDir, `${escapedId}.png`));
+    const escaped = await nativeFetch(`${apiBase}/api/media/${escapedId}`);
+    expect(escaped.status).toBe(404);
+  });
+
+  it('only previews safe image/video files whose resolved path stays inside /workspace', async () => {
+    const workspace = path.join(tempDir, 'sandbox-workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'sample.mp4'), 'video-bytes');
+    const response = await nativeFetch(`${apiBase}/api/terminal/media?path=${encodeURIComponent('/workspace/sample.mp4')}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('video/mp4');
+    expect(response.headers.get('content-disposition')).toContain('inline');
+    expect(response.headers.get('accept-ranges')).toBe('bytes');
+    const partial = await nativeFetch(`${apiBase}/api/terminal/media?path=${encodeURIComponent('/workspace/sample.mp4')}`, { headers: { Range: 'bytes=2-5' } });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get('content-range')).toBe('bytes 2-5/11');
+    expect(await partial.text()).toBe('deo-');
+    const download = await nativeFetch(`${apiBase}/api/terminal/media?path=${encodeURIComponent('/workspace/sample.mp4')}&download=1`);
+    expect(download.headers.get('content-disposition')).toContain('attachment');
+    expect(openSandboxMediaFile('/workspace/../outside.mp4')).toBeNull();
+    fs.writeFileSync(path.join(tempDir, 'outside.mp4'), 'private');
+    fs.symlinkSync(path.join(tempDir, 'outside.mp4'), path.join(workspace, 'escape.mp4'));
+    expect(openSandboxMediaFile('/workspace/escape.mp4')).toBeNull();
+    const directEscape = await nativeFetch(`${apiBase}/api/terminal/media?path=${encodeURIComponent('/workspace/escape.mp4')}`);
+    expect(directEscape.status).toBe(404);
+    fs.mkdirSync(path.join(tempDir, 'outside-dir'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'outside-dir', 'nested.mp4'), 'private');
+    fs.symlinkSync(path.join(tempDir, 'outside-dir'), path.join(workspace, 'escape-dir'));
+    expect(openSandboxMediaFile('/workspace/escape-dir/nested.mp4')).toBeNull();
+    const nestedEscape = await nativeFetch(`${apiBase}/api/terminal/media?path=${encodeURIComponent('/workspace/escape-dir/nested.mp4')}`);
+    expect(nestedEscape.status).toBe(404);
+    fs.writeFileSync(path.join(workspace, 'race.mp4'), 'safe-before-swap');
+    const pinned = openSandboxMediaFile('/workspace/race.mp4');
+    expect(pinned).not.toBeNull();
+    fs.unlinkSync(path.join(workspace, 'race.mp4'));
+    fs.symlinkSync(path.join(tempDir, 'outside.mp4'), path.join(workspace, 'race.mp4'));
+    try { expect(fs.readFileSync(pinned!.fd, 'utf8')).toBe('safe-before-swap'); }
+    finally { fs.closeSync(pinned!.fd); }
   });
 
   it('reports an unavailable runtime and never executes the command on the host', async () => {
@@ -164,17 +249,39 @@ describe('Web search', () => {
     expect(results).toEqual([{ title: 'Example & Title', url: 'https://example.com/docs', snippet: 'Helpful source snippet.' }]);
   });
 
-  it('does not call DuckDuckGo after a default Brave Search 429', async () => {
+  it('falls back across default search providers after rate limits', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const visited: string[] = [];
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
       visited.push(url.hostname);
       return { status: 429, headers: { get: name => name === 'retry-after' ? '30' : null }, body: 'private upstream body' };
     });
-    expect(visited).toEqual(['search.brave.com']);
+    expect(visited).toEqual(['search.brave.com', 'www.bing.com', 'html.duckduckgo.com']);
     expect(result.error).toContain('HTTP 429');
+    expect(result.error).toContain('built-in public search providers');
     expect(result.error).toContain('Try again later');
     expect(result.error).not.toContain('private upstream body');
+  });
+
+  it('continues to another default provider after a CAPTCHA challenge', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
+    const visited: string[] = [];
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
+      visited.push(url.hostname);
+      if (url.hostname !== 'html.duckduckgo.com') return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'text/html' : null },
+        body: '<html><title>Security check - CAPTCHA</title><div class="g-recaptcha">private challenge</div></html>',
+      };
+      return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'text/html' : null },
+        body: '<div class="result"><a class="result__a" href="https://example.com/article">Fallback result</a><a class="result__snippet">Fallback snippet</a></div>',
+      };
+    });
+    expect(visited).toEqual(['search.brave.com', 'www.bing.com', 'html.duckduckgo.com']);
+    expect(result.error).toBeUndefined();
+    expect(result.output.results[0].title).toBe('Fallback result');
   });
 
   it('replaces a legacy saved DuckDuckGo URL with Brave rather than requesting DuckDuckGo', async () => {
@@ -189,7 +296,7 @@ describe('Web search', () => {
     expect(result.output.results[0].title).toBe('Brave result');
   });
 
-  it('discards CAPTCHA challenge HTML and never returns its contents', async () => {
+  it('discards CAPTCHA pages from every default provider and never returns their contents', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const challenge = '<html><title>Security check - CAPTCHA</title><div class="g-recaptcha">secret challenge body</div></html>';
     const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async () => ({

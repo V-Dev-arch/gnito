@@ -24,6 +24,7 @@ import { registerPluginRoutes } from './plugins.js';
 import { registerIncognitoRoutes } from './incognito.js';
 import { registerSettingsRoutes } from './settings.js';
 import { registerBackupRoutes } from './backup.js';
+import { registerMediaRoutes } from './media.js';
 
 export function createApp(): Express {
   const app = express();
@@ -77,6 +78,7 @@ export function createApp(): Express {
   registerIncognitoRoutes(app);
   registerSettingsRoutes(app);
   registerBackupRoutes(app);
+  registerMediaRoutes(app);
 
   // Serve the built frontend (dist/client) — registered BEFORE the 404 handler
   // so /api/* is handled first but static assets take precedence over 404.

@@ -130,7 +130,7 @@ export function TerminalPage() {
 
   const copySetupCommand = async () => {
     try {
-      await navigator.clipboard.writeText('docker build --pull -t gnito-sandbox:3.24.2 -f docker/terminal/Dockerfile .');
+      await navigator.clipboard.writeText('docker build --pull -t gnito-sandbox:3.24.3 -f docker/terminal/Dockerfile .');
     } catch { setError('Could not copy the Docker build command.'); }
   };
 
@@ -149,7 +149,7 @@ export function TerminalPage() {
         <div className="terminal-status-copy">
           <strong>{statusMessage(status)}</strong>
           {status?.workspaceDir && <span>Persistent workspace: <span className="terminal-workspace-path">{status.workspaceDir}</span></span>}
-          {status?.reason === 'sandbox-image-not-built' && <div className="terminal-setup"><span>Build the image from the Gnito repository root:</span><code>docker build --pull -t gnito-sandbox:3.24.2 -f docker/terminal/Dockerfile .</code><button className="btn btn-ghost btn-sm" onClick={copySetupCommand}>Copy</button></div>}
+          {status?.reason === 'sandbox-image-not-built' && <div className="terminal-setup"><span>Build the image from the Gnito repository root:</span><code>docker build --pull -t gnito-sandbox:3.24.3 -f docker/terminal/Dockerfile .</code><button className="btn btn-ghost btn-sm" onClick={copySetupCommand}>Copy</button></div>}
           {status?.reason === 'docker-not-installed' && <span>Install Docker Engine or Docker Desktop, start its daemon, then build the Gnito sandbox image.</span>}
           {status?.reason === 'docker-daemon-unavailable' && <span>Start Docker Engine and refresh. Commands are disabled until the daemon is available.</span>}
           {status?.reason === 'server-running-as-root' && <span>Restart Gnito under a non-root OS user. Terminal is intentionally disabled for a root server process.</span>}
@@ -171,7 +171,7 @@ export function TerminalPage() {
               </select>
             </label>
           </div>
-          <p className="terminal-command-meta">Review the exact command before running it. Only the Gnito sandbox workspace is mounted; no host credentials are injected. A persistent sandbox home stores CLI configuration inside that workspace, so treat saved credentials as local secrets. Interactive stdin is not supported; for GitHub use <code>gh auth login --web --hostname github.com --git-protocol https</code> and follow the device-code prompt shown in live output. Docker memory is limited to 512 MB; workspace usage is capped at 256 MiB and Gnito preserves 128 MiB of host disk headroom.</p>
+          <p className="terminal-command-meta">Review the exact command before running it. Only the Gnito sandbox workspace is mounted; no host credentials are injected. A persistent sandbox home stores CLI configuration inside that workspace, so treat saved credentials as local secrets. Interactive stdin is not supported; for GitHub use <code>gh auth login --web --hostname github.com --git-protocol https</code> and follow the device-code prompt shown in live output. The image includes ffmpeg and CA certificates. Docker memory is limited to 512 MB; workspace usage is capped at 1 GiB and Gnito preserves 512 MiB of host disk headroom.</p>
         </div>
         <div className="terminal-actions">
           <button className="btn btn-primary" onClick={() => void run()} disabled={!status?.available || !command.trim() || running} data-testid="button-run-terminal">

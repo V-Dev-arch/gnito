@@ -20,6 +20,7 @@ import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
 import { executeAgentTerminal } from './tools.js';
+import { storeGeneratedPng } from './media.js';
 
 const db = getDb();
 const MANUS_API_ROOT = 'https://api.manus.ai';
@@ -189,13 +190,20 @@ export function registerProviderRoutes(app: any): void {
       model: z.string().min(1).max(200),
       messages: z.array(z.object({
         role: z.enum(['system', 'user', 'assistant', 'tool']),
-        content: z.string().max(200_000),
+        content: z.union([
+          z.string().max(200_000),
+          z.array(z.union([
+            z.object({ type: z.literal('text'), text: z.string().max(200_000) }),
+            z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string().max(7_000_000) }) }),
+          ])).max(20),
+        ]),
       })).min(1).max(200),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().positive().max(128_000).optional(),
       stream: z.boolean().default(true),
       allowTerminal: z.boolean().default(false),
       allowNetwork: z.boolean().default(false),
+      allowImageTools: z.boolean().default(false),
       chatId: z.string().min(1).max(200).optional(),
     });
     const parsed = ChatRequest.safeParse(req.body);
@@ -204,6 +212,19 @@ export function registerProviderRoutes(app: any): void {
       return;
     }
     const body = parsed.data;
+    const imageParts = body.messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part.type === 'image_url') : []);
+    if (imageParts.some(part => !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(part.image_url.url))) {
+      res.status(400).json({ error: 'validation', message: 'Image attachments must be local PNG, JPEG, WebP or GIF files within the attachment size limit.' });
+      return;
+    }
+    if (row.kind === 'manus-agent' && imageParts.length) {
+      res.status(400).json({ error: 'unsupported-attachments', message: 'This provider path does not forward image attachments. Choose an OpenAI- or Anthropic-compatible vision model.' });
+      return;
+    }
+    if (body.allowImageTools && ['anthropic-compatible', 'manus-agent'].includes(row.kind)) {
+      res.status(400).json({ error: 'unsupported-image-tools', message: 'AI image generation requires an OpenAI-compatible provider that exposes the Images API.' });
+      return;
+    }
     if (body.allowNetwork && !body.allowTerminal) {
       res.status(400).json({ error: 'validation', message: 'Enable terminal access before granting terminal network access.' });
       return;
@@ -247,7 +268,7 @@ export function registerProviderRoutes(app: any): void {
         const result = await runManusTask({
           apiKey,
           profile: body.model,
-          messages: body.messages,
+          messages: body.messages.map(message => ({ role: message.role, content: providerText(message.content) })),
           signal: abortController.signal,
           onTaskCreated: taskId => { manusTaskId = taskId; send('activity', { message: `Manus task created · ${taskId}` }); },
           onStatus: status => send('activity', { message: `Manus status · ${status}` }),
@@ -270,43 +291,43 @@ export function registerProviderRoutes(app: any): void {
         ...JSON.parse(row.custom_headers || '{}'),
       };
 
-      if (body.allowTerminal) {
+      if (body.allowTerminal || body.allowImageTools) {
         const text = row.kind === 'anthropic-compatible'
           ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send });
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send, imageUrl: appendEndpoint(row.base_url, '/images/generations') });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
         return;
       }
 
+      const anthropicSystemPrompt = providerText(body.messages.find(message => message.role === 'system')?.content);
+      const providerRequestBody = row.kind === 'anthropic-compatible'
+        ? {
+            model: body.model,
+            messages: body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) })),
+            ...(anthropicSystemPrompt ? { system: anthropicSystemPrompt } : {}),
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens ?? 4096,
+          }
+        : {
+            model: body.model,
+            messages: body.messages,
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens,
+          };
       const resp = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(
-          row.kind === 'anthropic-compatible'
-            ? {
-                model: body.model,
-                messages: body.messages.filter(m => m.role !== 'system'),
-                system: body.messages.find(m => m.role === 'system')?.content,
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-            : {
-                model: body.model,
-                messages: body.messages,
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-        ),
+        body: JSON.stringify(providerRequestBody),
         signal: abortController.signal,
       });
 
       if (!resp.ok) {
         void resp.body?.cancel().catch(() => {});
-        send('error', { message: safeProviderStatusError(resp.status, 'Chat request') });
+        send('error', { message: safeProviderStatusError(resp.status, imageParts.length ? 'Vision chat request' : 'Chat request') });
         send('end', {});
         res.end();
         return;
@@ -506,7 +527,7 @@ async function stopManusTask(apiKey: string, taskId: string): Promise<void> {
   } catch { /* the user has already stopped the Gnito stream; do not leak secrets or block */ }
 }
 
-type AgentChatBody = { model: string; messages: { role: string; content: string }[]; temperature?: number; maxTokens?: number };
+type AgentChatBody = { model: string; messages: { role: string; content: any }[]; temperature?: number; maxTokens?: number };
 type AgentSend = (event: string, data: unknown) => void;
 
 const TERMINAL_TOOL = {
@@ -516,13 +537,8 @@ const TERMINAL_TOOL = {
     description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
     parameters: {
       type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to run in /workspace.' },
-        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-        networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
-      },
+      properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
       required: ['command'],
-      additionalProperties: false,
     },
   },
 };
@@ -532,47 +548,83 @@ const ANTHROPIC_TERMINAL_TOOL = {
   description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
   input_schema: {
     type: 'object',
-    properties: {
-      command: { type: 'string', description: 'Shell command to run in /workspace.' },
-      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-      networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
-    },
+    properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
     required: ['command'],
   },
 };
 
-const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it only when a command materially helps with the request. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask the user before destructive or irreversible operations. Never claim a command ran unless the tool result confirms it. Network access is available only if the user enabled it and the tool call sets networkAccess=true.';
+const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it when commands materially help. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask before destructive or irreversible operations. Never claim a command ran unless its tool result confirms it. The Network toggle is authoritative and Gnito applies it to every command; do not try to change or bypass it. For public GitHub repositories, prefer `git clone https://github.com/OWNER/REPO.git` rather than `gh repo clone`, which may require a CLI login. When cloning or downloading, set `timeoutMs` to at least 180000. If Network is off, explain that it must be enabled before cloning. If a network-enabled clone fails, test `curl -I https://github.com` and `git ls-remote https://github.com/OWNER/REPO.git` and report the exact observed error; do not claim the repo cloned unless the command confirms it. When creating images/videos in /workspace, return a Markdown link to /api/terminal/media?path=<URL-encoded absolute /workspace path> for safe preview and download.';
+
+const IMAGE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'generate_image',
+    description: 'Generate one image using the configured provider Images API. Use when the user asks to create, draw, or generate an image. Return the resulting image using the provided Markdown image URL so Gnito can render it and offer a download button.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Detailed visual description of the requested image.' },
+        model: { type: 'string', description: 'Optional image model exposed by this provider; defaults to gpt-image-1.' },
+        size: { type: 'string', description: 'Optional size: 1024x1024, 1536x1024, or 1024x1536.' },
+      },
+      required: ['prompt'],
+    },
+  },
+};
+
+const IMAGE_TOOL_POLICY = 'An image-generation tool is available because the user explicitly enabled Image tools. Use it only when an image is requested. After a successful image generation, include the exact returned Markdown image link in your final answer; Gnito renders it with a download action. The configured provider must support the OpenAI Images API. The request may incur provider charges.';
 
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; send: AgentSend;
+  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; forceImageGeneration: boolean;
+  imageUrl: string; send: AgentSend;
 }): Promise<string> {
-  const messages: any[] = [{ role: 'system', content: TERMINAL_TOOL_POLICY }, ...options.body.messages];
+  const policies = [
+    ...(options.allowTerminal ? [TERMINAL_TOOL_POLICY] : []),
+    ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []),
+  ];
+  const messages: any[] = [...(policies.length ? [{ role: 'system', content: policies.join('\n\n') }] : []), ...options.body.messages];
   let toolCount = 0;
+  let imageCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
+    const { response, streamedText } = await postProviderChat(options.url, options.headers, {
       model: options.body.model,
       messages,
-      stream: false,
+      stream: true,
       temperature: options.body.temperature,
       max_tokens: options.body.maxTokens,
-      tools: [TERMINAL_TOOL],
-      tool_choice: 'auto',
-    }, options.signal);
+      tools: [
+        ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
+        ...(options.allowImageTools ? [IMAGE_TOOL] : []),
+      ],
+      tool_choice: round === 0 && options.forceImageGeneration
+        ? { type: 'function', function: { name: 'generate_image' } }
+        : 'auto',
+    }, options.signal, delta => options.send('chunk', { delta }));
     const message = response?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    if (!calls.length) return providerText(message.content);
+    if (!calls.length) return streamedText ? '' : providerText(message.content);
     messages.push(message);
     for (const call of calls) {
       const callId = String(call.id || randomUUID());
       let result: any;
       try {
         const args = typeof call.function?.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function?.arguments;
-        if (call.function?.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.function?.name || 'unknown')}`);
-        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
-        toolCount++;
-        result = await runAgentTerminal(args, options);
+        if (call.function?.name === 'terminal_run' && options.allowTerminal) {
+          if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+          toolCount++;
+          result = await runAgentTerminal(args, options);
+        } else if (call.function?.name === 'generate_image' && options.allowImageTools) {
+          if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
+          imageCount++;
+          options.send('activity', { message: 'Generating an image with the selected provider…' });
+          result = await generateImage(args, options.imageUrl, options.headers, options.signal);
+          if (result.output) options.send('media', result.output);
+          else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
+        } else {
+          throw new Error(`Unsupported or disabled tool requested: ${String(call.function?.name || 'unknown')}`);
+        }
       } catch (error: any) {
         result = { error: error?.message || 'The requested tool call could not be run.' };
       }
@@ -582,25 +634,85 @@ async function runOpenAIAgent(options: {
   throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
 }
 
+async function generateImage(input: unknown, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
+  const schema = z.object({
+    prompt: z.string().trim().min(1).max(2_000),
+    model: z.string().trim().min(1).max(120).default('gpt-image-1'),
+    size: z.enum(['1024x1024', '1536x1024', '1024x1536']).default('1024x1024'),
+  });
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) return { error: 'The image-generation request was invalid.' };
+  const { prompt, model, size } = parsed.data;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, prompt, size, n: 1, ...(model.toLowerCase().startsWith('dall-e') ? { response_format: 'b64_json' } : {}) }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+    });
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      return { error: safeProviderStatusError(response.status, 'Image generation') };
+    }
+    const maxResponseBytes = 28 * 1024 * 1024;
+    if (Number(response.headers.get('content-length') || 0) > maxResponseBytes) {
+      void response.body?.cancel().catch(() => {});
+      return { error: 'The provider image response exceeded the 28 MiB transfer limit.' };
+    }
+    const reader = response.body?.getReader();
+    if (!reader) return { error: 'The provider returned an empty image response.' };
+    const chunks: Uint8Array[] = [];
+    let responseBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        responseBytes += value.byteLength;
+        if (responseBytes > maxResponseBytes) {
+          await reader.cancel().catch(() => {});
+          return { error: 'The provider image response exceeded the 28 MiB transfer limit.' };
+        }
+        chunks.push(value);
+      }
+    } finally { reader.releaseLock(); }
+    const text = Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
+    let json: any;
+    try { json = JSON.parse(text); } catch { return { error: 'The provider returned invalid JSON for image generation.' }; }
+    const encoded = json?.data?.[0]?.b64_json;
+    if (typeof encoded !== 'string') return { error: 'The provider returned no base64 image. Select a provider/model that supports OpenAI Images API output.' };
+    const stored = storeGeneratedPng(encoded);
+    return { output: {
+      kind: 'image',
+      url: stored.url,
+      downloadUrl: `${stored.url}?download=1`,
+      prompt,
+      markdown: `![Generated image](${stored.url})`,
+    } };
+  } catch (error: any) {
+    return { error: safeProviderError(error, 'Image generation') };
+  }
+}
+
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
   chatId: string; allowNetwork: boolean; send: AgentSend;
 }): Promise<string> {
   const system = [TERMINAL_TOOL_POLICY, ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
-  const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content }));
+  const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) }));
   let toolCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
+    const { response, streamedText } = await postAnthropicChat(options.url, options.headers, {
       model: options.body.model,
       messages,
       system,
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
       tools: [ANTHROPIC_TERMINAL_TOOL],
-    }, options.signal);
+      stream: true,
+    }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
     const calls = blocks.filter((block: any) => block?.type === 'tool_use');
-    if (!calls.length) return blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
+    if (!calls.length) return streamedText ? '' : blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
     messages.push({ role: 'assistant', content: blocks });
     const toolResults = [];
     for (const call of calls) {
@@ -637,22 +749,201 @@ async function runAgentTerminal(input: unknown, options: {
   });
 }
 
-async function postProviderJson(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<any> {
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+async function postProviderChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
     throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
   }
-  const text = await response.text();
-  if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
-  try { return JSON.parse(text); }
-  catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let assistantText = '';
+  let finishReason = '';
+  const calls = new Map<number, any>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.error) throw new Error(String(event.error.message || 'Provider streaming request failed.'));
+    const choice = event?.choices?.[0];
+    if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason;
+    const delta = choice?.delta;
+    if (typeof delta?.content === 'string' && delta.content) {
+      assistantText += delta.content;
+      if (assistantText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+      onTextDelta(delta.content);
+    }
+    if (!Array.isArray(delta?.tool_calls)) return;
+    for (const toolDelta of delta.tool_calls) {
+      const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : calls.size;
+      const call = calls.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } };
+      if (typeof toolDelta?.id === 'string') call.id = toolDelta.id;
+      if (typeof toolDelta?.type === 'string') call.type = toolDelta.type;
+      if (typeof toolDelta?.function?.name === 'string') call.function.name += toolDelta.function.name;
+      if (typeof toolDelta?.function?.arguments === 'string') call.function.arguments += toolDelta.function.arguments;
+      calls.set(index, call);
+    }
+  });
+  if (!sawDone && !finishReason) throw new Error('Provider stream ended before the response was complete.');
+
+  const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+  return {
+    response: { choices: [{ message: { role: 'assistant', content: assistantText || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) } }] },
+    streamedText: assistantText,
+  };
+}
+
+async function postAnthropicChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
+  }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let streamedText = '';
+  let stopReason: string | undefined;
+  let messageStopped = false;
+  const blocks = new Map<number, any>();
+  const partialInputs = new Map<number, string>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.type === 'error' || event?.error) throw new Error(String(event?.error?.message || 'Provider streaming request failed.'));
+    if (event?.type === 'message_stop') messageStopped = true;
+    if (event?.type === 'message_delta' && typeof event.delta?.stop_reason === 'string') stopReason = event.delta.stop_reason;
+    const index = Number.isInteger(event?.index) ? event.index : 0;
+    if (event?.type === 'content_block_start' && event.content_block && typeof event.content_block === 'object') {
+      blocks.set(index, { ...event.content_block });
+      return;
+    }
+    if (event?.type === 'content_block_delta') {
+      const block = blocks.get(index) || {};
+      if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+        block.text = `${block.text || ''}${event.delta.text}`;
+        streamedText += event.delta.text;
+        if (streamedText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+        onTextDelta(event.delta.text);
+      } else if (event.delta?.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
+        partialInputs.set(index, `${partialInputs.get(index) || ''}${event.delta.partial_json}`);
+      }
+      blocks.set(index, block);
+      return;
+    }
+    if (event?.type === 'content_block_stop') {
+      const partial = partialInputs.get(index);
+      if (partial) {
+        try { (blocks.get(index) || {}).input = JSON.parse(partial); }
+        catch { throw new Error('Provider returned invalid tool arguments in its streaming response.'); }
+        partialInputs.delete(index);
+      }
+    }
+  });
+  if (!sawDone && !messageStopped) throw new Error('Provider stream ended before the response was complete.');
+  return { response: { content: [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block), stop_reason: stopReason }, streamedText };
+}
+
+type ProviderFetchResponse = Awaited<ReturnType<typeof fetch>>;
+
+async function fetchToolEnabledResponse(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<ProviderFetchResponse> {
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (response.status !== 400 || !body || typeof body !== 'object' || Array.isArray(body) || (body as any).stream !== true) return response;
+  // Some otherwise compatible providers reject SSE when tools are present. A 400 means the
+  // request was rejected before completion; retry once without stream, keeping the same tools
+  // and server-side permission gates. Providers that reject tool calling still return a useful 400.
+  void response.body?.cancel().catch(() => {});
+  return fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...(body as Record<string, unknown>), stream: false }),
+    signal,
+  });
+}
+
+async function readProviderSse(response: Pick<ProviderFetchResponse, 'body'>, onEvent: (event: any) => void): Promise<boolean> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Provider returned an empty streaming response.');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let receivedBytes = 0;
+  let finished = false;
+  let sawDone = false;
+  const parseBlock = (block: string) => {
+    const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
+    if (!data) return;
+    if (data === '[DONE]') { finished = true; sawDone = true; return; }
+    try { onEvent(JSON.parse(data)); }
+    catch (error: any) {
+      if (error instanceof SyntaxError) throw new Error('Provider returned invalid JSON in its streaming response.');
+      throw error;
+    }
+  };
+  try {
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > 2_000_000) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Provider response exceeded the 2 MB limit.');
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        parseBlock(block);
+        if (finished) break;
+      }
+    }
+    if (!finished) buffer += decoder.decode();
+    if (!finished && buffer.trim()) parseBlock(buffer);
+    return sawDone;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function providerText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('');
   return '';
+}
+
+function hasExplicitImageRequest(messages: { role: string; content: any }[]): boolean {
+  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user');
+  const text = providerText(latestUserMessage?.content);
+  return /\b(?:create|generate|make|draw|paint|illustrate|render|design)\b[\s\S]{0,120}\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b/i.test(text)
+    || /\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b[\s\S]{0,120}\b(?:create|generate|make|draw|paint|illustrate|render|design)\b/i.test(text);
+}
+
+function toAnthropicContent(content: any): any {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const blocks: any[] = [];
+  for (const part of content) {
+    if (part?.type === 'text' && typeof part.text === 'string') blocks.push({ type: 'text', text: part.text });
+    if (part?.type !== 'image_url' || typeof part.image_url?.url !== 'string') continue;
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/.exec(part.image_url.url);
+    if (match) blocks.push({ type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } });
+  }
+  return blocks;
 }
 
 async function listModelsForProvider(row: any, apiKey: string): Promise<ModelInfo[]> {
@@ -690,6 +981,9 @@ function safeProviderStatusError(status: number, operation: string): string {
   const detail = status === 401 || status === 403 ? 'authentication was rejected'
     : status === 404 ? 'the endpoint was not found'
     : status === 429 ? 'the provider rate limit was reached'
+    : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible'
+    : status === 400 && operation === 'Image generation' ? 'the image endpoint rejected the request; check Images API support and the selected image model/size'
+    : status === 400 && operation === 'Vision chat request' ? 'the provider rejected image input; choose a vision-capable model and supported image format'
     : status === 400 ? 'the request was rejected; check the model ID and request settings'
     : status >= 500 ? 'the provider returned a server error'
     : 'the provider rejected the request';

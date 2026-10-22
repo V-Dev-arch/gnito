@@ -44,15 +44,18 @@ export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
 // --- web_search ---------------------------------------------------------
 const DEFAULT_SEARCH_TARGETS = [
   { label: 'Brave Search', url: 'https://search.brave.com/search' },
+  { label: 'Bing Search', url: 'https://www.bing.com/search' },
+  { label: 'DuckDuckGo HTML Search', url: 'https://html.duckduckgo.com/html/' },
 ] as const;
 const SEARCH_ATTEMPT_TIMEOUT_MS = 7_000;
-const SEARCH_ROUTE_TIMEOUT_MS = 18_000;
+const SEARCH_ROUTE_TIMEOUT_MS = 25_000;
 
 function isBuiltInSearchBackend(value: string): boolean {
   try {
     const url = new URL(value);
     const host = url.hostname.toLowerCase();
     return (host === 'search.brave.com' && /^\/search\/?$/.test(url.pathname))
+      || (host === 'www.bing.com' && /^\/search\/?$/.test(url.pathname))
       || (host === 'html.duckduckgo.com' && /^\/html\/?$/.test(url.pathname))
       || (host === 'lite.duckduckgo.com' && /^\/lite\/?$/.test(url.pathname));
   } catch { return false; }
@@ -102,6 +105,7 @@ export async function executeWebSearch(
       const contentType = resp.headers.get('content-type') || '';
       if (isSearchChallengePage(resp.body)) {
         failures.push(`${label} returned an anti-bot or CAPTCHA challenge. The challenge page was discarded and was not sent to the model.`);
+        if (index < targets.length - 1) continue;
         return { error: searchFailureMessage(failures, usesDefaultProviders) };
       }
       const results = /application\/json/i.test(contentType)
@@ -134,7 +138,7 @@ export async function executeWebSearch(
 
 function searchFailureMessage(failures: string[], usedDefaultProviders: boolean): string {
   const source = failures.join(' ');
-  const providerState = usedDefaultProviders ? 'Brave Search is unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
+  const providerState = usedDefaultProviders ? 'The built-in public search providers are unavailable or rate-limited.' : 'The configured search backend is unavailable or rate-limited.';
   return `${source} ${providerState} Try again later or configure a public HTTPS SearXNG endpoint in Settings → Tools & Search.`;
 }
 
@@ -295,7 +299,7 @@ TOOL_REGISTRY.set('terminal_run', {
   requiresConfirmation: true,
   inputSchema: z.object({
     command: z.string().min(1).max(10_000),
-    timeoutMs: z.number().int().min(1000).max(300_000).default(60_000),
+    timeoutMs: z.number().int().min(1000).max(300_000).default(180_000),
     networkAccess: z.boolean().default(false),
   }),
   execute: async (input, signal, options) => runSandboxCommand(input.command, input.timeoutMs, signal, {
@@ -315,20 +319,15 @@ export async function executeAgentTerminal(input: unknown, options: {
   if (!tool) throw new Error('Terminal tool is unavailable.');
   const parsed = tool.inputSchema.safeParse(input);
   if (!parsed.success) throw new Error(`Terminal tool arguments are invalid: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
-  const value = parsed.data as { command: string; timeoutMs: number; networkAccess: boolean };
+  const requested = parsed.data as { command: string; timeoutMs: number; networkAccess: boolean };
+  // The chat-level opt-in is authoritative. Models often omit a secondary
+  // networkAccess argument even when the user has enabled Network in the UI.
+  const value = { ...requested, networkAccess: options.allowNetwork };
   const runId = randomUUID();
   const startedAt = Date.now();
   const context = options.chatId.slice(0, 200);
   db.prepare('INSERT INTO tool_runs (id, tool, input, status, started_at, context) VALUES (?,?,?,?,?,?)')
     .run(runId, tool.name, JSON.stringify(value), 'approved', startedAt, context);
-
-  if (value.networkAccess && !options.allowNetwork) {
-    const message = 'Network permission was not enabled for this chat message. Ask the user to enable it before retrying.';
-    db.prepare("UPDATE tool_runs SET status='denied', ended_at=?, error=? WHERE id=?")
-      .run(Date.now(), message, runId);
-    options.onEvent?.({ type: 'end', runId, status: 'denied', command: value.command, networkAccess: false, error: message });
-    return { runId, status: 'denied', error: message };
-  }
 
   const controller = new AbortController();
   const abort = () => controller.abort();
