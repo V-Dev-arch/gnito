@@ -150,16 +150,16 @@ describe('provider response safety', () => {
     }
   });
 
-  it('retries an HTTP 400 tool request once without streaming and retains the same tool permissions', async () => {
+  it('retries tool requests without streaming and without tool_choice when an endpoint rejects those options', async () => {
     const requestBodies: any[] = [];
     const upstream = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       requestBodies.push(body);
-      if (body.stream) {
+      if (body.stream || body.tool_choice !== undefined) {
         res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'This endpoint requires non-streaming tool calls.' } }));
+        res.end(JSON.stringify({ error: { message: 'This endpoint rejects streaming and tool_choice.' } }));
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -190,9 +190,11 @@ describe('provider response safety', () => {
         expect(events).toContain('event: tool-start');
         expect(events).toContain('event: tool-end');
         expect(events).toContain('Recovered without streaming.');
-        expect(requestBodies.map(body => body.stream)).toEqual([true, false, true, false]);
-        expect(requestBodies[0].tools).toEqual(requestBodies[1].tools);
-        expect(requestBodies[2].tools).toEqual(requestBodies[3].tools);
+        expect(requestBodies.map(body => body.stream)).toEqual([true, false, false, true, false, false]);
+        expect(requestBodies.every(body => JSON.stringify(body.tools) === JSON.stringify(requestBodies[0].tools))).toBe(true);
+        expect(requestBodies.slice(0, 2).every(body => body.tool_choice === 'auto')).toBe(true);
+        expect(requestBodies[2]).not.toHaveProperty('tool_choice');
+        expect(requestBodies[5]).not.toHaveProperty('tool_choice');
       });
     } finally {
       upstream.closeAllConnections();
@@ -223,7 +225,7 @@ describe('provider response safety', () => {
         });
         const events = await response.text();
         expect(response.status).toBe(200);
-        expect(events).toContain('HTTP 400: the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible');
+        expect(events).toContain('HTTP 400: the provider rejected the tool-enabled request; Gnito could not determine whether the cause is the endpoint, model, or request format');
         expect(events).not.toContain('PRIVATE_UPSTREAM_VALIDATION_DETAILS');
       });
     } finally {

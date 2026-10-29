@@ -863,18 +863,34 @@ async function postAnthropicChat(
 type ProviderFetchResponse = Awaited<ReturnType<typeof fetch>>;
 
 async function fetchToolEnabledResponse(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<ProviderFetchResponse> {
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  if (response.status !== 400 || !body || typeof body !== 'object' || Array.isArray(body) || (body as any).stream !== true) return response;
-  // Some otherwise compatible providers reject SSE when tools are present. A 400 means the
-  // request was rejected before completion; retry once without stream, keeping the same tools
-  // and server-side permission gates. Providers that reject tool calling still return a useful 400.
-  void response.body?.cancel().catch(() => {});
-  return fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ...(body as Record<string, unknown>), stream: false }),
-    signal,
+  const request = (requestBody: unknown) => fetch(url, {
+    method: 'POST', headers, body: JSON.stringify(requestBody), signal,
   });
+  const first = await request(body);
+  if (first.status !== 400 || !body || typeof body !== 'object' || Array.isArray(body)) return first;
+
+  const original = body as Record<string, unknown>;
+  let response = first;
+  let retryBody = original;
+  if (original.stream === true) {
+    // Some otherwise compatible providers reject SSE when tools are present. Retry the same
+    // tool request as JSON; permissions and tool definitions remain unchanged.
+    void response.body?.cancel().catch(() => {});
+    retryBody = { ...original, stream: false };
+    response = await request(retryBody);
+    if (response.status !== 400) return response;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(retryBody, 'tool_choice')) {
+    // Several OpenAI-compatible endpoints support function tools but reject an explicit
+    // `tool_choice: "auto"`. Omitting it preserves the tools and lets the endpoint use its
+    // documented default. This also lets models choose a tool after a forced-image attempt.
+    void response.body?.cancel().catch(() => {});
+    const compatibleBody = { ...retryBody };
+    delete compatibleBody.tool_choice;
+    response = await request(compatibleBody);
+  }
+  return response;
 }
 
 async function readProviderSse(response: Pick<ProviderFetchResponse, 'body'>, onEvent: (event: any) => void): Promise<boolean> {
@@ -981,7 +997,7 @@ function safeProviderStatusError(status: number, operation: string): string {
   const detail = status === 401 || status === 403 ? 'authentication was rejected'
     : status === 404 ? 'the endpoint was not found'
     : status === 429 ? 'the provider rate limit was reached'
-    : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool request; this model may not support function calling or the tool schema may be incompatible'
+    : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool-enabled request; Gnito could not determine whether the cause is the endpoint, model, or request format'
     : status === 400 && operation === 'Image generation' ? 'the image endpoint rejected the request; check Images API support and the selected image model/size'
     : status === 400 && operation === 'Vision chat request' ? 'the provider rejected image input; choose a vision-capable model and supported image format'
     : status === 400 ? 'the request was rejected; check the model ID and request settings'
