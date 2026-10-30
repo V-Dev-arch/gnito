@@ -590,7 +590,10 @@ async function runOpenAIAgent(options: {
     const { response, streamedText } = await postProviderChat(options.url, options.headers, {
       model: options.body.model,
       messages,
-      stream: true,
+      // Keep tool turns non-streaming so the original assistant message (including provider-
+      // specific fields such as reasoning_content required by some APIs on tool follow-up) is
+      // preserved verbatim. Ordinary chat without tools still uses the streaming route below.
+      stream: false,
       temperature: options.body.temperature,
       max_tokens: options.body.maxTokens,
       tools: [
@@ -708,7 +711,7 @@ async function runAnthropicAgent(options: {
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
       tools: [ANTHROPIC_TERMINAL_TOOL],
-      stream: true,
+      stream: false,
     }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
     const calls = blocks.filter((block: any) => block?.type === 'tool_use');

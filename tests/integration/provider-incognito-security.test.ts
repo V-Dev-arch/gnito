@@ -190,11 +190,12 @@ describe('provider response safety', () => {
         expect(events).toContain('event: tool-start');
         expect(events).toContain('event: tool-end');
         expect(events).toContain('Recovered without streaming.');
-        expect(requestBodies.map(body => body.stream)).toEqual([true, false, false, true, false, false]);
+        expect(requestBodies.map(body => body.stream)).toEqual([false, false, false, false]);
         expect(requestBodies.every(body => JSON.stringify(body.tools) === JSON.stringify(requestBodies[0].tools))).toBe(true);
-        expect(requestBodies.slice(0, 2).every(body => body.tool_choice === 'auto')).toBe(true);
-        expect(requestBodies[2]).not.toHaveProperty('tool_choice');
-        expect(requestBodies[5]).not.toHaveProperty('tool_choice');
+        expect(requestBodies[0].tool_choice).toBe('auto');
+        expect(requestBodies[1]).not.toHaveProperty('tool_choice');
+        expect(requestBodies[2].tool_choice).toBe('auto');
+        expect(requestBodies[3]).not.toHaveProperty('tool_choice');
       });
     } finally {
       upstream.closeAllConnections();

@@ -57,12 +57,13 @@ beforeAll(async () => {
       }, 120);
       return;
     }
-    if (Array.isArray(body.messages) && !body.messages.some((message: any) => message.role === 'tool') && body.messages.some((message: any) => message.role === 'user' && message.content === 'Stream a terminal tool call')) {
-      const argumentsJson = JSON.stringify({ command: 'pwd' });
-      res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'tool-call-terminal_run', type: 'function', function: { name: 'terminal_run', arguments: argumentsJson.slice(0, 8) } }] } }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: argumentsJson.slice(8) } }] }, finish_reason: 'tool_calls' }] })}\n\n`);
-      res.end('data: [DONE]\n\n');
+    if (Array.isArray(body.messages) && !body.messages.some((message: any) => message.role === 'tool') && body.messages.some((message: any) => message.role === 'user' && message.content === 'Preserve reasoning metadata')) {
+      expect(body.stream).toBe(false);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: {
+        role: 'assistant', content: null, reasoning_content: 'provider-private-reasoning-state',
+        tool_calls: [{ id: 'tool-call-terminal_run', type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } }],
+      } }] }));
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -121,10 +122,10 @@ async function sendChat(providerId: string, payload: Record<string, unknown>) {
 }
 
 describe('autonomous terminal tool loop', () => {
-  it('streams assistant text immediately when terminal tools are available but unused', async () => {
+  it('streams ordinary assistant text when terminal tools are disabled', async () => {
     const providerId = await createProvider({ kind: 'custom', label: 'Mock streaming provider', baseUrl: openAiUrl, enabled: true });
     const response = await sendChat(providerId, {
-      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: true, allowNetwork: false,
+      model: 'mock-model', allowTerminal: false, allowNetwork: false,
       messages: [{ role: 'user', content: 'Incremental stream test' }],
     });
     expect(response.status).toBe(200);
@@ -141,12 +142,12 @@ describe('autonomous terminal tool loop', () => {
     expect(rest).toContain('event: end');
   });
 
-  it('assembles streamed tool-call deltas before executing and sends the tool result in the next provider turn', async () => {
-    const providerId = await createProvider({ kind: 'custom', label: 'Mock streamed-tool provider', baseUrl: openAiUrl, enabled: true });
+  it('preserves provider-specific assistant metadata on tool calls for the next provider turn', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock metadata provider', baseUrl: openAiUrl, enabled: true });
     const requestStart = openAiRequests.length;
     const response = await sendChat(providerId, {
       model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: true, allowNetwork: false,
-      messages: [{ role: 'user', content: 'Stream a terminal tool call' }],
+      messages: [{ role: 'user', content: 'Preserve reasoning metadata' }],
     });
     expect(response.status).toBe(200);
     const stream = await response.text();
@@ -156,6 +157,8 @@ describe('autonomous terminal tool loop', () => {
     const followup = openAiRequests.slice(requestStart).find(body => body.messages.some((message: any) => message.role === 'tool'));
     const assistantCall = followup.messages.find((message: any) => message.role === 'assistant' && message.tool_calls);
     expect(assistantCall.tool_calls[0]).toMatchObject({ id: 'tool-call-terminal_run', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } });
+    expect(assistantCall.reasoning_content).toBe('provider-private-reasoning-state');
+    expect(followup.stream).toBe(false);
   });
 
   it('runs the model-directed tool only after per-message permission and records its exact command/result', async () => {
