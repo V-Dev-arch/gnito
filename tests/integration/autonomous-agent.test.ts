@@ -71,14 +71,20 @@ beforeAll(async () => {
       } }] }));
       return;
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
     if (req.url?.includes('/images/generations')) {
+      if (req.url !== '/v1/images/generations') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'no endpoint found for this path' } }));
+        return;
+      }
       const isUrlImage = body.prompt === 'A URL image';
+      res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ data: [isUrlImage
         ? { url: `${openAiUrl}/generated.png` }
         : { b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
       return;
     }
+    res.writeHead(200, { 'content-type': 'application/json' });
     if (!body.messages.some((message: any) => message.role === 'tool')) {
       const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'generate_image');
       if (imageTool) expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
@@ -200,7 +206,7 @@ describe('autonomous terminal tool loop', () => {
   });
 
   it('exposes image generation only when opted in and emits a local media event with a final Markdown link', async () => {
-    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock Images provider', baseUrl: openAiUrl, apiKey: 'test-openai-key', enabled: true });
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock Images provider', baseUrl: `${openAiUrl}/chat/completions`, apiKey: 'test-openai-key', enabled: true });
     const response = await sendChat(providerId, {
       model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
       messages: [{ role: 'user', content: 'Create a test image.' }],

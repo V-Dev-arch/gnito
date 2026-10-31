@@ -84,7 +84,12 @@ export async function executeWebSearch(
         return { error: 'Search backend must be a public HTTPS URL without embedded credentials or a fragment.' };
       }
       target.searchParams.set('q', input.query);
-      if (!usesDefaultProviders && /searx/i.test(target.hostname)) target.searchParams.set('format', 'json');
+      // A self-hosted SearXNG instance may use any hostname, so do not rely on
+      // the hostname containing "searx" to select its JSON API response.
+      if (!usesDefaultProviders) {
+        target.searchParams.set('format', 'json');
+        target.searchParams.set('categories', 'general');
+      }
       const resp = await fetcher(target, {
         signal,
         timeoutMs: SEARCH_ATTEMPT_TIMEOUT_MS,

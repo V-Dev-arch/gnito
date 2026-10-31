@@ -249,6 +249,22 @@ describe('Web search', () => {
     expect(results).toEqual([{ title: 'Example & Title', url: 'https://example.com/docs', snippet: 'Helpful source snippet.' }]);
   });
 
+  it('uses JSON mode and parses SearXNG on a custom hostname', async () => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', ?)").run('https://search.example/search');
+    let requested: URL | undefined;
+    const result = await executeWebSearch({ query: 'current test', maxResults: 5 }, new AbortController().signal, async (url: URL) => {
+      requested = url;
+      return {
+        status: 200,
+        headers: { get: name => name === 'content-type' ? 'application/json' : null },
+        body: JSON.stringify({ results: [{ title: 'SearX result', url: 'https://example.com/result', content: 'A SearXNG snippet.' }] }),
+      };
+    });
+    expect(requested?.searchParams.get('format')).toBe('json');
+    expect(requested?.searchParams.get('categories')).toBe('general');
+    expect(result.output.results).toEqual([{ title: 'SearX result', url: 'https://example.com/result', snippet: 'A SearXNG snippet.' }]);
+  });
+
   it('falls back across default search providers after rate limits', async () => {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('workspace.searchBackend', '')").run();
     const visited: string[] = [];

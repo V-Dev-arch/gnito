@@ -386,11 +386,19 @@ function buildChatUrl(row: any): string {
   const suffix = row.kind === 'anthropic-compatible' ? '/v1/messages' : '/chat/completions';
   return appendEndpoint(row.base_url, suffix);
 }
-
 function appendEndpoint(baseUrl: string, endpoint: string): string {
-  const base = String(baseUrl || '').replace(/\/+$/, '');
+  const base = normalizeOpenAIBaseUrl(baseUrl);
   const path = endpoint.startsWith('/v1/') && /\/v1$/i.test(base) ? endpoint.slice(3) : endpoint;
   return `${base}${path}`;
+}
+function normalizeOpenAIBaseUrl(baseUrl: string): string {
+  let base = String(baseUrl || '').replace(/\/+$/, '');
+  base = base.replace(/\/(?:chat\/completions|responses|images\/generations|models)$/i, '');
+  try {
+    const url = new URL(base);
+    if (url.hostname.toLowerCase() === 'api.openai.com' && url.pathname === '') base = `${base}/v1`;
+  } catch { /* Provider URL validation reports malformed URLs before this point. */ }
+  return base;
 }
 
 function extractAssistantText(json: any, kind: string): string {
