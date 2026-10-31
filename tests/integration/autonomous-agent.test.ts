@@ -44,6 +44,11 @@ beforeAll(async () => {
     .run(chatId, null, 'Agent test', 'active', Date.now(), Date.now());
 
   openAiServer = createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url?.endsWith('/generated.png')) {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==', 'base64'));
+      return;
+    }
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -68,7 +73,10 @@ beforeAll(async () => {
     }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (req.url?.includes('/images/generations')) {
-      res.end(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
+      const isUrlImage = body.prompt === 'A URL image';
+      res.end(JSON.stringify({ data: [isUrlImage
+        ? { url: `${openAiUrl}/generated.png` }
+        : { b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
       return;
     }
     if (!body.messages.some((message: any) => message.role === 'tool')) {
@@ -80,7 +88,8 @@ beforeAll(async () => {
       const properties = body.tools.find((entry: any) => entry.function?.name === tool).function.parameters.properties;
       if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'model', 'size']);
       else expect(Object.keys(properties)).toEqual(['command']);
-      const args = imageTool ? { prompt: 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
+      const asksForUrlImage = body.messages.some((message: any) => message.role === 'user' && (message.content === 'Create a URL image.' || message.content === 'I want an image of a mountain cabin at sunset.'));
+      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
       const toolMessage = body.messages.find((message: any) => message.role === 'tool');
@@ -208,6 +217,20 @@ describe('autonomous terminal tool loop', () => {
     expect(preview.headers.get('content-type')).toContain('image/png');
     const blocked = await nativeFetch(`${baseUrl}${mediaPath}`);
     expect(blocked.status).toBe(401);
+  });
+
+  it('forces the image tool for natural image requests and imports URL-based Images API output', async () => {
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock URL Images provider', baseUrl: openAiUrl, apiKey: 'test-openai-key', enabled: true });
+    const requestStart = openAiRequests.length;
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
+      messages: [{ role: 'user', content: 'I want an image of a mountain cabin at sunset.' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(openAiRequests.slice(requestStart)[0].tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+    expect(stream).toContain('event: media');
+    expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
   });
 
   it('routes Manus through the documented async task API and returns real status/final task text', async () => {

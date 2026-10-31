@@ -637,6 +637,27 @@ async function runOpenAIAgent(options: {
   throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
 }
 
+async function readLimitedResponse(response: globalThis.Response, maxBytes: number): Promise<Buffer> {
+  if (Number(response.headers.get('content-length') || 0) > maxBytes) throw new Error('The provider image response exceeded the 20 MiB transfer limit.');
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('The provider returned an empty image response.');
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error('The provider image response exceeded the 20 MiB transfer limit.');
+      }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  return Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
+}
+
 async function generateImage(input: unknown, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
   const schema = z.object({
     prompt: z.string().trim().min(1).max(2_000),
@@ -681,8 +702,26 @@ async function generateImage(input: unknown, url: string, headers: Record<string
     const text = Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
     let json: any;
     try { json = JSON.parse(text); } catch { return { error: 'The provider returned invalid JSON for image generation.' }; }
-    const encoded = json?.data?.[0]?.b64_json;
-    if (typeof encoded !== 'string') return { error: 'The provider returned no base64 image. Select a provider/model that supports OpenAI Images API output.' };
+    let encoded = json?.data?.[0]?.b64_json;
+    const remoteUrl = json?.data?.[0]?.url;
+    if (typeof encoded !== 'string' && typeof remoteUrl === 'string') {
+      let parsedUrl: URL;
+      try { parsedUrl = new URL(remoteUrl); }
+      catch { return { error: 'The provider returned an invalid image URL.' }; }
+      let providerOrigin = '';
+      try { providerOrigin = new URL(url).origin; } catch { /* the request URL was already validated by the provider call */ }
+      if (parsedUrl.protocol !== 'https:' && parsedUrl.origin !== providerOrigin) return { error: 'The provider returned an unsafe image URL.' };
+      const imageResponse = await fetch(parsedUrl, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+      });
+      if (!imageResponse.ok) {
+        void imageResponse.body?.cancel().catch(() => {});
+        return { error: safeProviderStatusError(imageResponse.status, 'Image download') };
+      }
+      const imageBytes = await readLimitedResponse(imageResponse, 20 * 1024 * 1024);
+      encoded = imageBytes.toString('base64');
+    }
+    if (typeof encoded !== 'string') return { error: 'The provider returned no image data. Select a provider/model that supports OpenAI Images API output.' };
     const stored = storeGeneratedPng(encoded);
     return { output: {
       kind: 'image',
@@ -948,8 +987,12 @@ function providerText(content: unknown): string {
 function hasExplicitImageRequest(messages: { role: string; content: any }[]): boolean {
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user');
   const text = providerText(latestUserMessage?.content);
-  return /\b(?:create|generate|make|draw|paint|illustrate|render|design)\b[\s\S]{0,120}\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b/i.test(text)
-    || /\b(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)\b[\s\S]{0,120}\b(?:create|generate|make|draw|paint|illustrate|render|design)\b/i.test(text);
+  const image = '(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)';
+  const creation = '(?:create|generate|make|draw|paint|illustrate|render|design)';
+  return new RegExp(`\\b${creation}\\b[\\s\\S]{0,120}\\b${image}\\b`, 'i').test(text)
+    || new RegExp(`\\b${image}\\b[\\s\\S]{0,120}\\b${creation}\\b`, 'i').test(text)
+    || new RegExp(`\\b(?:need|want|would like|looking for)\\b[\\s\\S]{0,80}\\b${image}\\b`, 'i').test(text)
+    || new RegExp(`\\b(?:can you|could you|please)\\b[\\s\\S]{0,80}\\b(?:give me|show me)\\b[\\s\\S]{0,40}\\b${image}\\b`, 'i').test(text);
 }
 
 function toAnthropicContent(content: any): any {
