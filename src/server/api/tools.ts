@@ -20,6 +20,7 @@ import { getDb } from '../db/index.js';
 import { redactSecrets, truncateForLog } from '../security/redact.js';
 import { fetchPublicUrl } from '../security/publicFetch.js';
 import { getSandboxStatus, runSandboxCommand } from '../sandbox/docker.js';
+import { githubApiRequest } from '../plugins/github.js';
 
 const db = getDb();
 
@@ -40,6 +41,31 @@ interface ToolDef {
 
 /** All registered tools. */
 export const TOOL_REGISTRY: Map<string, ToolDef> = new Map();
+
+TOOL_REGISTRY.set('github_api', {
+  name: 'github_api',
+  description: 'Use the connected GitHub account through GitHub REST API paths. The PAT stays encrypted in Gnito and GitHub enforces the exact scopes/permissions granted when the token was created. Use only /user, /repos, /orgs, /search, /gists, and other GitHub API paths; never put tokens in request data.',
+  permissions: ['github:read', 'github:write'],
+  requiresConfirmation: false,
+  inputSchema: z.object({
+    method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('GET'),
+    path: z.string().regex(/^\/(?!\/)[A-Za-z0-9][A-Za-z0-9/_?.=&%:+,@~-]{0,1900}$/),
+    body: z.record(z.string(), z.unknown()).optional(),
+  }),
+  execute: async (input, _signal) => {
+    const result = await githubApiRequest({ ...input, signal: _signal });
+    if ('error' in result) return result;
+    return { output: { status: result.status, scopes: result.headers.get('x-oauth-scopes') || '', data: result.data } };
+  },
+});
+
+export async function executeGitHubTool(input: unknown, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
+  const tool = TOOL_REGISTRY.get('github_api');
+  if (!tool) return { error: 'GitHub tool is unavailable.' };
+  const parsed = tool.inputSchema.safeParse(input);
+  if (!parsed.success) return { error: 'The GitHub API request was invalid.' };
+  return tool.execute(parsed.data, signal);
+}
 
 // --- web_search ---------------------------------------------------------
 const DEFAULT_SEARCH_TARGETS = [

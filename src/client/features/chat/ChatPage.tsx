@@ -224,6 +224,7 @@ export function ChatPage({ chatId, projectId }: Props) {
   const [terminalTools, setTerminalTools] = useState(false);
   const [terminalNetwork, setTerminalNetwork] = useState(false);
   const [imageTools, setImageTools] = useState(false);
+  const [githubTools, setGithubTools] = useState(false);
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [pendingMedia, setPendingMedia] = useState<GeneratedMedia[]>([]);
   const [searching, setSearching] = useState(false);
@@ -274,6 +275,12 @@ export function ChatPage({ chatId, projectId }: Props) {
   useEffect(() => {
     let alive = true;
     api.get('/api/tools/sandbox/status').then((status: SandboxStatus) => { if (alive) setSandboxStatus(status); }).catch(() => { if (alive) setSandboxStatus(null); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    api.get('/api/plugins/github/status').then((status: any) => { if (alive) setGithubTools(Boolean(status?.connected)); }).catch(() => { if (alive) setGithubTools(false); });
     return () => { alive = false; };
   }, []);
 
@@ -461,7 +468,7 @@ export function ChatPage({ chatId, projectId }: Props) {
     setActivity(`Connecting to ${chosenProvider?.label || 'provider'} · ${activeModel}…`);
     abortRef.current = api.streamChat(
       selectedProvider,
-      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider) },
+      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider), allowGitHubTools: githubTools },
       delta => {
         setActivity(`Generating with ${chosenProvider?.label || 'provider'} · ${activeModel}`);
         streamedTextRef.current += delta;
@@ -542,7 +549,7 @@ export function ChatPage({ chatId, projectId }: Props) {
         setPendingMedia(current => [...current, media]);
       },
     );
-  }, [input, attachments, streaming, saving, searching, searchWeb, terminalTools, terminalNetwork, imageTools, selectedProvider, activeModel, modelsError, chatId, messages, projectId, setLocation, chosenProvider, memoryEntries]);
+  }, [input, attachments, streaming, saving, searching, searchWeb, terminalTools, terminalNetwork, imageTools, githubTools, selectedProvider, activeModel, modelsError, chatId, messages, projectId, setLocation, chosenProvider, memoryEntries]);
 
   const stop = () => {
     abortRef.current?.abort();

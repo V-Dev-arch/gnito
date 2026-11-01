@@ -19,7 +19,7 @@ import { z } from 'zod';
 import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
-import { executeAgentTerminal } from './tools.js';
+import { executeAgentTerminal, executeGitHubTool } from './tools.js';
 import { storeGeneratedPng } from './media.js';
 
 const db = getDb();
@@ -204,6 +204,7 @@ export function registerProviderRoutes(app: any): void {
       allowTerminal: z.boolean().default(false),
       allowNetwork: z.boolean().default(false),
       allowImageTools: z.boolean().default(false),
+      allowGitHubTools: z.boolean().default(false),
       chatId: z.string().min(1).max(200).optional(),
     });
     const parsed = ChatRequest.safeParse(req.body);
@@ -291,10 +292,10 @@ export function registerProviderRoutes(app: any): void {
         ...JSON.parse(row.custom_headers || '{}'),
       };
 
-      if (body.allowTerminal || body.allowImageTools) {
+      if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools) {
         const text = row.kind === 'anthropic-compatible'
-          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send, imageUrl: appendEndpoint(row.base_url, '/images/generations') });
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowGitHubTools: body.allowGitHubTools, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send, imageUrls: imageEndpointCandidates(row.base_url) });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
@@ -399,6 +400,18 @@ function normalizeOpenAIBaseUrl(baseUrl: string): string {
     if (url.hostname.toLowerCase() === 'api.openai.com' && url.pathname === '') base = `${base}/v1`;
   } catch { /* Provider URL validation reports malformed URLs before this point. */ }
   return base;
+}
+function imageEndpointCandidates(baseUrl: string): string[] {
+  const candidates = [appendEndpoint(baseUrl, '/images/generations')];
+  try {
+    const normalized = new URL(normalizeOpenAIBaseUrl(baseUrl));
+    if (!/(^|\/)v1(?:\/|$)/i.test(normalized.pathname)) {
+      const withV1 = new URL(normalized.toString());
+      withV1.pathname = `${withV1.pathname.replace(/\/+$/, '')}/v1`;
+      candidates.push(appendEndpoint(withV1.toString(), '/images/generations'));
+    }
+  } catch { /* Provider URL validation reports malformed URLs before this point. */ }
+  return [...new Set(candidates)];
 }
 
 function extractAssistantText(json: any, kind: string): string {
@@ -561,6 +574,20 @@ const ANTHROPIC_TERMINAL_TOOL = {
   },
 };
 
+const ANTHROPIC_GITHUB_TOOL = {
+  name: 'github_api',
+  description: 'Use the connected GitHub PAT through the GitHub REST API. GitHub enforces the token scopes and fine-grained repository permissions; never expose the token.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+      path: { type: 'string', description: 'Relative GitHub API path beginning with /.' },
+      body: { type: 'object', description: 'JSON request body for POST, PUT, or PATCH.' },
+    },
+    required: ['path'],
+  },
+};
+
 const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it when commands materially help. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask before destructive or irreversible operations. Never claim a command ran unless its tool result confirms it. The Network toggle is authoritative and Gnito applies it to every command; do not try to change or bypass it. For public GitHub repositories, prefer `git clone https://github.com/OWNER/REPO.git` rather than `gh repo clone`, which may require a CLI login. When cloning or downloading, set `timeoutMs` to at least 180000. If Network is off, explain that it must be enabled before cloning. If a network-enabled clone fails, test `curl -I https://github.com` and `git ls-remote https://github.com/OWNER/REPO.git` and report the exact observed error; do not claim the repo cloned unless the command confirms it. When creating images/videos in /workspace, return a Markdown link to /api/terminal/media?path=<URL-encoded absolute /workspace path> for safe preview and download.';
 
 const IMAGE_TOOL = {
@@ -581,37 +608,71 @@ const IMAGE_TOOL = {
 };
 
 const IMAGE_TOOL_POLICY = 'An image-generation tool is available because the user explicitly enabled Image tools. Use it only when an image is requested. After a successful image generation, include the exact returned Markdown image link in your final answer; Gnito renders it with a download action. The configured provider must support the OpenAI Images API. The request may incur provider charges.';
-
+const GITHUB_TOOL = {
+  type: 'function',
+  function: {
+    name: 'github_api',
+    description: 'Use the connected GitHub PAT through the GitHub REST API. The token’s scopes and fine-grained repository permissions are enforced by GitHub; never ask for or expose the token. Use relative API paths such as /user, /user/repos, /repos/OWNER/REPO/issues, /repos/OWNER/REPO/contents/PATH, or /repos/OWNER/REPO/pulls.',
+    parameters: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method.' },
+        path: { type: 'string', description: 'Relative GitHub API path beginning with /. Never use a full URL.' },
+        body: { type: 'object', description: 'JSON request body for POST, PUT, or PATCH.' },
+      },
+      required: ['path'],
+    },
+  },
+};
+const GITHUB_TOOL_POLICY = 'A GitHub plugin is connected. Use github_api for GitHub work instead of asking the user to paste tokens or using terminal credentials. GitHub itself enforces the PAT scopes and fine-grained repository permissions. Explain write or destructive actions before making them, and never claim success unless the tool result confirms it.';
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; forceImageGeneration: boolean;
-  imageUrl: string; send: AgentSend;
+  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; forceImageGeneration: boolean;
+  imageUrls: string[]; send: AgentSend;
 }): Promise<string> {
   const policies = [
     ...(options.allowTerminal ? [TERMINAL_TOOL_POLICY] : []),
     ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []),
+    ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []),
   ];
   const messages: any[] = [...(policies.length ? [{ role: 'system', content: policies.join('\n\n') }] : []), ...options.body.messages];
   let toolCount = 0;
   let imageCount = 0;
   for (let round = 0; round < 10; round++) {
-    const { response, streamedText } = await postProviderChat(options.url, options.headers, {
-      model: options.body.model,
-      messages,
-      // Keep tool turns non-streaming so the original assistant message (including provider-
-      // specific fields such as reasoning_content required by some APIs on tool follow-up) is
-      // preserved verbatim. Ordinary chat without tools still uses the streaming route below.
-      stream: false,
-      temperature: options.body.temperature,
-      max_tokens: options.body.maxTokens,
-      tools: [
-        ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
-        ...(options.allowImageTools ? [IMAGE_TOOL] : []),
-      ],
-      tool_choice: round === 0 && options.forceImageGeneration
-        ? { type: 'function', function: { name: 'generate_image' } }
-        : 'auto',
-    }, options.signal, delta => options.send('chunk', { delta }));
+    let turn: { response: any; streamedText: string };
+    try {
+      turn = await postProviderChat(options.url, options.headers, {
+        model: options.body.model,
+        messages,
+        // Keep tool turns non-streaming so the original assistant message (including provider-
+        // specific fields such as reasoning_content required by some APIs on tool follow-up) is
+        // preserved verbatim. Ordinary chat without tools still uses the streaming route below.
+        stream: false,
+        temperature: options.body.temperature,
+        max_tokens: options.body.maxTokens,
+        tools: [
+          ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
+          ...(options.allowImageTools ? [IMAGE_TOOL] : []),
+          ...(options.allowGitHubTools ? [GITHUB_TOOL] : []),
+        ],
+        tool_choice: round === 0 && options.forceImageGeneration
+          ? { type: 'function', function: { name: 'generate_image' } }
+          : 'auto',
+      }, options.signal, delta => options.send('chunk', { delta }));
+    } catch (error) {
+      if (round === 0 && options.forceImageGeneration && options.allowImageTools) {
+        options.send('activity', { message: 'The provider rejected tool chat; using the image tool directly…' });
+        const prompt = providerText([...options.body.messages].reverse().find(message => message.role === 'user')?.content).trim();
+        const fallback = await generateImage({ prompt, size: '1024x1024' }, options.imageUrls, options.headers, options.signal);
+        if (fallback.output) {
+          options.send('media', fallback.output);
+          return fallback.output.markdown || '';
+        }
+        throw new Error(fallback.error || (error as Error)?.message || 'Image generation failed.');
+      }
+      throw error;
+    }
+    const { response, streamedText } = turn;
     const message = response?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
@@ -630,9 +691,11 @@ async function runOpenAIAgent(options: {
           if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
           imageCount++;
           options.send('activity', { message: 'Generating an image with the selected provider…' });
-          result = await generateImage(args, options.imageUrl, options.headers, options.signal);
+          result = await generateImage(args, options.imageUrls, options.headers, options.signal);
           if (result.output) options.send('media', result.output);
           else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
+        } else if (call.function?.name === 'github_api' && options.allowGitHubTools) {
+          result = await executeGitHubTool(args, options.signal);
         } else {
           throw new Error(`Unsupported or disabled tool requested: ${String(call.function?.name || 'unknown')}`);
         }
@@ -666,25 +729,35 @@ async function readLimitedResponse(response: globalThis.Response, maxBytes: numb
   return Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
 }
 
-async function generateImage(input: unknown, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
+async function generateImage(input: unknown, urls: string[], headers: Record<string, string>, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
   const schema = z.object({
     prompt: z.string().trim().min(1).max(2_000),
-    model: z.string().trim().min(1).max(120).default('gpt-image-1'),
+    model: z.string().trim().min(1).max(120).optional(),
     size: z.enum(['1024x1024', '1536x1024', '1024x1536']).default('1024x1024'),
   });
   const parsed = schema.safeParse(input);
   if (!parsed.success) return { error: 'The image-generation request was invalid.' };
-  const { prompt, model, size } = parsed.data;
+  const { prompt, size } = parsed.data;
+  const requestedModel = parsed.data.model || '';
+  const model = /(?:image|dall-e|flux|imagen|stable|diffusion)/i.test(requestedModel) ? requestedModel : 'gpt-image-1';
   try {
-    const response = await fetch(url, {
+    let response: globalThis.Response | null = null;
+    let lastStatus = 0;
+    for (const url of urls) {
+      response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({ model, prompt, size, n: 1, ...(model.toLowerCase().startsWith('dall-e') ? { response_format: 'b64_json' } : {}) }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
-    });
+      });
+      lastStatus = response.status;
+      if (response.ok || ![400, 404].includes(response.status) || url === urls[urls.length - 1]) break;
+      void response.body?.cancel().catch(() => {});
+    }
+    if (!response) return { error: 'No image-generation endpoint is configured for this provider.' };
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
-      return { error: safeProviderStatusError(response.status, 'Image generation') };
+      return { error: safeProviderStatusError(lastStatus, 'Image generation') };
     }
     const maxResponseBytes = 28 * 1024 * 1024;
     if (Number(response.headers.get('content-length') || 0) > maxResponseBytes) {
@@ -717,7 +790,7 @@ async function generateImage(input: unknown, url: string, headers: Record<string
       try { parsedUrl = new URL(remoteUrl); }
       catch { return { error: 'The provider returned an invalid image URL.' }; }
       let providerOrigin = '';
-      try { providerOrigin = new URL(url).origin; } catch { /* the request URL was already validated by the provider call */ }
+      try { providerOrigin = new URL(urls[0]).origin; } catch { /* the request URL was already validated by the provider call */ }
       if (parsedUrl.protocol !== 'https:' && parsedUrl.origin !== providerOrigin) return { error: 'The provider returned an unsafe image URL.' };
       const imageResponse = await fetch(parsedUrl, {
         signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
@@ -745,9 +818,9 @@ async function generateImage(input: unknown, url: string, headers: Record<string
 
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; send: AgentSend;
+  chatId: string; allowNetwork: boolean; allowGitHubTools: boolean; send: AgentSend;
 }): Promise<string> {
-  const system = [TERMINAL_TOOL_POLICY, ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
+  const system = [TERMINAL_TOOL_POLICY, ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
   const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) }));
   let toolCount = 0;
   for (let round = 0; round < 10; round++) {
@@ -757,7 +830,7 @@ async function runAnthropicAgent(options: {
       system,
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
-      tools: [ANTHROPIC_TERMINAL_TOOL],
+      tools: [ANTHROPIC_TERMINAL_TOOL, ...(options.allowGitHubTools ? [ANTHROPIC_GITHUB_TOOL] : [])],
       stream: false,
     }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
@@ -768,10 +841,14 @@ async function runAnthropicAgent(options: {
     for (const call of calls) {
       let result: any;
       try {
-        if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
-        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
-        toolCount++;
-        result = await runAgentTerminal(call.input, options);
+        if (call.name === 'github_api' && options.allowGitHubTools) {
+          result = await executeGitHubTool(call.input, options.signal);
+        } else {
+          if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
+          if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+          toolCount++;
+          result = await runAgentTerminal(call.input, options);
+        }
       } catch (error: any) {
         result = { error: error?.message || 'The requested tool call could not be run.' };
       }
