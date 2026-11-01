@@ -22,6 +22,7 @@ let apiServer: any;
 let baseUrl = '';
 let openAiServer: any;
 let openAiUrl = '';
+const openAiRequests: any[] = [];
 let manusCalls: string[] = [];
 
 type TestSession = { token: string; csrf: string };
@@ -43,17 +44,67 @@ beforeAll(async () => {
     .run(chatId, null, 'Agent test', 'active', Date.now(), Date.now());
 
   openAiServer = createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url?.endsWith('/generated.png')) {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==', 'base64'));
+      return;
+    }
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    openAiRequests.push(body);
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Incremental stream test')) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Visible immediately.' } }] })}\n\n`);
+      setTimeout(() => {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ' Final streamed text.' } }] })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      }, 120);
+      return;
+    }
+    if (Array.isArray(body.messages) && !body.messages.some((message: any) => message.role === 'tool') && body.messages.some((message: any) => message.role === 'user' && message.content === 'Preserve reasoning metadata')) {
+      expect(body.stream).toBe(false);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: {
+        role: 'assistant', content: null, reasoning_content: 'provider-private-reasoning-state',
+        tool_calls: [{ id: 'tool-call-terminal_run', type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } }],
+      } }] }));
+      return;
+    }
+    if (req.url?.includes('/images/generations')) {
+      if (req.url !== '/v1/images/generations') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'no endpoint found for this path' } }));
+        return;
+      }
+      const isUrlImage = body.prompt === 'A URL image';
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [isUrlImage
+        ? { url: `${openAiUrl}/generated.png` }
+        : { b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (!body.messages.some((message: any) => message.role === 'tool')) {
-      expect(body.tools?.[0]?.function?.name).toBe('terminal_run');
-      expect(body.tool_choice).toBe('auto');
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'tool-call-1', type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd && ls -la', timeoutMs: 1000, networkAccess: false }) } }] } }] }));
+      const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'generate_image');
+      if (imageTool) expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+      else expect(body.tool_choice).toBe('auto');
+      const tool = imageTool ? 'generate_image' : 'terminal_run';
+      expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
+      const properties = body.tools.find((entry: any) => entry.function?.name === tool).function.parameters.properties;
+      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'model', 'size']);
+      else expect(Object.keys(properties)).toEqual(['command']);
+      const asksForUrlImage = body.messages.some((message: any) => message.role === 'user' && (message.content === 'Create a URL image.' || message.content === 'I want an image of a mountain cabin at sunset.'));
+      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
-      expect(body.messages.some((message: any) => message.role === 'tool' && message.tool_call_id === 'tool-call-1')).toBe(true);
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'The sandbox reported its Docker runtime status.' } }] }));
+      const toolMessage = body.messages.find((message: any) => message.role === 'tool');
+      expect(toolMessage).toBeTruthy();
+      const imageTool = toolMessage.tool_call_id === 'tool-call-generate_image';
+      if (imageTool) expect(toolMessage.content).toContain('/api/media/');
+      else expect(toolMessage.tool_call_id).toBe('tool-call-terminal_run');
+      const finalText = imageTool ? JSON.parse(toolMessage.content).output.markdown : 'The sandbox reported its Docker runtime status.';
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: finalText } }] }));
     }
   });
   await new Promise<void>(resolve => openAiServer.listen(0, '127.0.0.1', resolve));
@@ -86,6 +137,45 @@ async function sendChat(providerId: string, payload: Record<string, unknown>) {
 }
 
 describe('autonomous terminal tool loop', () => {
+  it('streams ordinary assistant text when terminal tools are disabled', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock streaming provider', baseUrl: openAiUrl, enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', allowTerminal: false, allowNetwork: false,
+      messages: [{ role: 'user', content: 'Incremental stream test' }],
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('Visible immediately.');
+    let rest = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      rest += new TextDecoder().decode(chunk.value);
+    }
+    expect(rest).toContain('Final streamed text.');
+    expect(rest).toContain('event: end');
+  });
+
+  it('preserves provider-specific assistant metadata on tool calls for the next provider turn', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Mock metadata provider', baseUrl: openAiUrl, enabled: true });
+    const requestStart = openAiRequests.length;
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: true, allowNetwork: false,
+      messages: [{ role: 'user', content: 'Preserve reasoning metadata' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(stream).toContain('event: tool-start');
+    expect(stream).toContain('event: tool-end');
+    expect(stream).toContain('The sandbox reported its Docker runtime status.');
+    const followup = openAiRequests.slice(requestStart).find(body => body.messages.some((message: any) => message.role === 'tool'));
+    const assistantCall = followup.messages.find((message: any) => message.role === 'assistant' && message.tool_calls);
+    expect(assistantCall.tool_calls[0]).toMatchObject({ id: 'tool-call-terminal_run', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } });
+    expect(assistantCall.reasoning_content).toBe('provider-private-reasoning-state');
+    expect(followup.stream).toBe(false);
+  });
+
   it('runs the model-directed tool only after per-message permission and records its exact command/result', async () => {
     const providerId = await createProvider({ kind: 'custom', label: 'Mock tool provider', baseUrl: openAiUrl, enabled: true });
     const response = await sendChat(providerId, {
@@ -100,7 +190,7 @@ describe('autonomous terminal tool loop', () => {
     expect(stream).not.toContain('Thinking…');
     const run = db.prepare('SELECT tool, input, status, context FROM tool_runs WHERE context=? ORDER BY started_at DESC LIMIT 1').get('autonomous-agent-chat') as any;
     expect(run.tool).toBe('terminal_run');
-    expect(JSON.parse(run.input)).toMatchObject({ command: 'pwd && ls -la', networkAccess: false });
+    expect(JSON.parse(run.input)).toMatchObject({ command: 'pwd && ls -la', timeoutMs: 180_000, networkAccess: false });
     expect(run.context).toBe('autonomous-agent-chat');
     expect(['failed', 'succeeded']).toContain(run.status);
   });
@@ -113,6 +203,40 @@ describe('autonomous terminal tool loop', () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ message: 'Enable terminal access before granting terminal network access.' });
+  });
+
+  it('exposes image generation only when opted in and emits a local media event with a final Markdown link', async () => {
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock Images provider', baseUrl: `${openAiUrl}/chat/completions`, apiKey: 'test-openai-key', enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
+      messages: [{ role: 'user', content: 'Create a test image.' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(stream).toContain('event: media');
+    expect(stream).toContain('/api/media/');
+    expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
+    const mediaPath = stream.match(/\/api\/media\/[0-9a-f-]+/i)?.[0];
+    expect(mediaPath).toBeTruthy();
+    const preview = await nativeFetch(`${baseUrl}${mediaPath}`, { headers: { 'X-Gnito-Session': session.token, 'X-Gnito-CSRF': session.csrf } });
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get('content-type')).toContain('image/png');
+    const blocked = await nativeFetch(`${baseUrl}${mediaPath}`);
+    expect(blocked.status).toBe(401);
+  });
+
+  it('forces the image tool for natural image requests and imports URL-based Images API output', async () => {
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock URL Images provider', baseUrl: openAiUrl, apiKey: 'test-openai-key', enabled: true });
+    const requestStart = openAiRequests.length;
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowTerminal: false, allowImageTools: true,
+      messages: [{ role: 'user', content: 'I want an image of a mountain cabin at sunset.' }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(openAiRequests.slice(requestStart)[0].tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+    expect(stream).toContain('event: media');
+    expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
   });
 
   it('routes Manus through the documented async task API and returns real status/final task text', async () => {

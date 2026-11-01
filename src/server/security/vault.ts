@@ -63,25 +63,32 @@ function writeVault(vault: VaultPayload): void {
   fs.writeFileSync(VAULT_FILE, Buffer.concat([nonce, ciphertext, tag]), { mode: 0o600 });
 }
 
+/** Store (or overwrite) an encrypted secret under a namespaced identifier. */
+export function setSecret(secretId: string, secret: string): void {
+  const v = readVault();
+  v[secretId] = secret;
+  writeVault(v);
+}
+
+/** Get a stored secret, or null. */
+export function getSecret(secretId: string): string | null {
+  const v = readVault();
+  return v[secretId] ?? null;
+}
+
+/** Delete a stored secret. */
+export function deleteSecret(secretId: string): void {
+  const v = readVault();
+  delete v[secretId];
+  writeVault(v);
+}
+
 /** Store (or overwrite) the API key for a provider. */
-export function setProviderSecret(providerId: string, apiKey: string): void {
-  const v = readVault();
-  v[providerId] = apiKey;
-  writeVault(v);
-}
-
+export function setProviderSecret(providerId: string, apiKey: string): void { setSecret(providerId, apiKey); }
 /** Get the stored API key for a provider, or null. */
-export function getProviderSecret(providerId: string): string | null {
-  const v = readVault();
-  return v[providerId] ?? null;
-}
-
+export function getProviderSecret(providerId: string): string | null { return getSecret(providerId); }
 /** Delete the stored API key for a provider. */
-export function deleteProviderSecret(providerId: string): void {
-  const v = readVault();
-  delete v[providerId];
-  writeVault(v);
-}
+export function deleteProviderSecret(providerId: string): void { deleteSecret(providerId); }
 
 /**
  * Clear all secrets — used by "delete all data" and by incognito session

@@ -38,8 +38,8 @@ export const CONFIG = {
   dbPath: path.join(DATA_DIR, 'gnito.db'),
   secretsVaultPath: path.join(DATA_DIR, 'secrets.enc'),
 
-  /** Max request body size (5 MB). */
-  maxBodyBytes: 5 * 1024 * 1024,
+  /** Max request body size (12 MB), including bounded local image attachments. */
+  maxBodyBytes: 12 * 1024 * 1024,
 
   /** Session token TTL (24 h). */
   sessionTtlMs: 24 * 3600_000,

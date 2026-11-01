@@ -18,9 +18,23 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { PluginManifestSchema } from '../../shared/types.js';
 import { CONFIG } from '../config.js';
+import { deleteGitHubToken, getGitHubToken, githubApiRequest, githubScopes, setGitHubToken, validateGitHubToken } from '../plugins/github.js';
 
 const db = getDb();
 const PLUGINS_DIR = path.join(CONFIG.dataDir, 'plugins');
+const GITHUB_PLUGIN = {
+  id: 'github',
+  builtIn: true,
+  manifest: {
+    name: 'GitHub',
+    version: '1.0.0',
+    description: 'Use GitHub through the REST API. Repository, issue, pull request, file, and workflow access follows the permissions granted to your PAT.',
+    author: 'Gnito',
+    license: 'MIT',
+    permissions: ['github:read', 'github:write'],
+    tools: ['github_api'],
+  },
+};
 
 async function ensurePluginsDir(): Promise<void> {
   await fs.mkdir(PLUGINS_DIR, { recursive: true });
@@ -49,7 +63,35 @@ export function registerPluginRoutes(app: any): void {
         });
       } catch { /* skip malformed */ }
     }
-    res.json(out);
+    res.json([{ ...GITHUB_PLUGIN, enabled: !!getGitHubToken(), state: getGitHubToken() ? 'connected' : 'not-configured' }, ...out]);
+  });
+
+  app.get('/api/plugins/github/status', async (_req: Request, res: Response) => {
+    if (!getGitHubToken()) { res.json({ ...GITHUB_PLUGIN, connected: false }); return; }
+    const result = await githubApiRequest({ method: 'GET', path: '/user' });
+    if ('error' in result) { res.json({ ...GITHUB_PLUGIN, connected: false, error: result.error }); return; }
+    res.json({ ...GITHUB_PLUGIN, connected: true, login: result.data?.login || '', scopes: githubScopes(result.headers) });
+  });
+
+  app.post('/api/plugins/github/connect', async (req: Request, res: Response) => {
+    const parsed = z.object({ token: z.string().trim().min(20).max(500) }).safeParse(req.body);
+    if (!parsed.success || !validateGitHubToken(parsed.data?.token || '')) {
+      res.status(400).json({ error: 'validation', message: 'Enter a GitHub classic or fine-grained personal access token.' });
+      return;
+    }
+    setGitHubToken(parsed.data.token);
+    const result = await githubApiRequest({ method: 'GET', path: '/user' });
+    if ('error' in result) {
+      deleteGitHubToken();
+      res.status(400).json({ error: 'github-authentication-failed', message: result.error });
+      return;
+    }
+    res.json({ ok: true, login: result.data?.login || '', scopes: githubScopes(result.headers) });
+  });
+
+  app.delete('/api/plugins/github', (_req: Request, res: Response) => {
+    deleteGitHubToken();
+    res.json({ ok: true });
   });
 
   // Install a plugin from a local directory path.
