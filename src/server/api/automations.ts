@@ -55,6 +55,8 @@ export function registerAutomationRoutes(app: any): void {
         kind: z.enum(['one-shot', 'recurring']).default('recurring'),
       }),
       taskInstruction: z.string().max(10000),
+      providerId: z.string().min(1),
+      modelId: z.string().min(1).max(200),
       missedRunPolicy: z.enum(['skip', 'run-once-on-startup', 'catch-up-within-window']).default('skip'),
       dryRun: z.boolean().default(false),
       maxSteps: z.number().int().positive().max(50).default(10),
@@ -62,18 +64,22 @@ export function registerAutomationRoutes(app: any): void {
       retryBackoffMs: z.number().int().nonnegative().max(60_000).default(30_000),
     }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation', issues: parsed.error.issues }); return; }
+    const provider = getSelectedProvider(parsed.data.providerId);
+    if (!provider) { res.status(400).json({ error: 'provider-unavailable', message: 'Select an enabled provider before creating the automation.' }); return; }
     const id = randomUUID();
     const now = Date.now();
     db.prepare(`
       INSERT INTO automations
-        (id, prompt, schedule, task_instruction, status, missed_run_policy, dry_run,
+        (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
          max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id,
       parsed.data.prompt,
       JSON.stringify(parsed.data.schedule),
       parsed.data.taskInstruction,
+      provider.id,
+      parsed.data.modelId,
       'draft',
       parsed.data.missedRunPolicy,
       parsed.data.dryRun ? 1 : 0,
@@ -90,6 +96,10 @@ export function registerAutomationRoutes(app: any): void {
   app.post('/api/automations/:id/activate', (req: Request, res: Response) => {
     const row = db.prepare('SELECT * FROM automations WHERE id = ?').get(req.params.id) as any;
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
+    if (!getSelectedProvider(row.provider_id) || !row.model_id) {
+      res.status(400).json({ error: 'provider-model-required', message: 'This automation must have an enabled provider and model selected before activation.' });
+      return;
+    }
     const schedule = JSON.parse(row.schedule);
     if (schedule.kind === 'recurring') {
       if (!cron.validate(schedule.expression)) {
@@ -119,10 +129,10 @@ export function registerAutomationRoutes(app: any): void {
     const now = Date.now();
     db.prepare(`
       INSERT INTO automations
-        (id, prompt, schedule, task_instruction, status, missed_run_policy, dry_run,
+        (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
          max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(id, row.prompt, row.schedule, row.task_instruction, 'draft',
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(id, row.prompt, row.schedule, row.task_instruction, row.provider_id, row.model_id, 'draft',
       row.missed_run_policy, row.dry_run, row.max_steps, row.max_retries, row.retry_backoff_ms, now, now);
     res.status(201).json({ id });
   });
@@ -320,11 +330,10 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
   `).run(randomUUID(), chatId, 'user', automation.task_instruction, now);
 
   try {
-    // Use the user's saved default model (or first enabled provider).
-    const defaultModelRow = db.prepare("SELECT value FROM settings WHERE key = 'composer.defaultModel'").get() as any;
-    const defaultModel = defaultModelRow?.value || '';
-    const provider = db.prepare('SELECT * FROM providers WHERE enabled = 1 LIMIT 1').get() as any;
-    if (!provider) throw new Error('No enabled provider configured.');
+    // Use only the provider and model explicitly saved on this automation.
+    const provider = getSelectedProvider(automation.provider_id);
+    const selectedModel = String(automation.model_id || '').trim();
+    if (!provider || !selectedModel) throw new Error('This automation has no enabled provider and model configured. Edit it in Automation Center before running it.');
 
     // Note: this is a synchronous, single-shot call (no agent loop yet).
     // Full agent-loop implementation is tracked in docs/implementation-status.md.
@@ -343,11 +352,11 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
     };
 
     const body = provider.kind === 'anthropic-compatible' ? {
-      model: defaultModel || 'claude-3-haiku-20240307',
+      model: selectedModel,
       messages: [{ role: 'user', content: automation.task_instruction }],
       max_tokens: 2000,
     } : {
-      model: defaultModel || 'gpt-4o-mini',
+      model: selectedModel,
       messages: [
         { role: 'system', content: 'You are Gnito, a local-first AI assistant. Execute the task and respond concisely.' },
         { role: 'user', content: automation.task_instruction },
@@ -397,6 +406,8 @@ function normalizeAutomation(r: any): any {
     prompt: r.prompt,
     schedule: JSON.parse(r.schedule),
     taskInstruction: r.task_instruction,
+    providerId: r.provider_id ?? undefined,
+    modelId: r.model_id ?? undefined,
     status: r.status,
     missedRunPolicy: r.missed_run_policy,
     dryRun: !!r.dry_run,
@@ -407,6 +418,11 @@ function normalizeAutomation(r: any): any {
     updatedAt: r.updated_at,
     nextRunAt: r.next_run_at ?? undefined,
   };
+}
+
+function getSelectedProvider(providerId: string | null | undefined): any | null {
+  if (!providerId) return null;
+  return db.prepare('SELECT * FROM providers WHERE id = ? AND enabled = 1').get(providerId) as any || null;
 }
 
 function normalizeRun(r: any): any {

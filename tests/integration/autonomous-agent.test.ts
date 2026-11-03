@@ -245,11 +245,12 @@ describe('autonomous terminal tool loop', () => {
   });
 
   it('runs an automation and persists its result as a Scheduled Tasks chat', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Automation-selected provider', baseUrl: openAiUrl, apiKey: 'automation-key', enabled: true });
     const automation = await nativeFetch(`${baseUrl}/api/automations`, {
       method: 'POST', headers: apiHeaders(true), body: JSON.stringify({
         prompt: 'Run a scheduled test',
         schedule: { expression: '0 0 1 1 *', timezone: 'UTC', kind: 'recurring' },
-        taskInstruction: 'Scheduled task test',
+        taskInstruction: 'Scheduled task test', providerId, modelId: 'automation-model',
       }),
     });
     expect(automation.status).toBe(201);
@@ -262,6 +263,9 @@ describe('autonomous terminal tool loop', () => {
       scheduledChats = await nativeFetch(`${baseUrl}/api/chats?automation=1`, { headers: apiHeaders() }).then(response => response.json());
       if (scheduledChats.length) break;
     }
+    const automationRequest = openAiRequests.find(body => body.messages?.some((message: any) => message.role === 'user' && message.content === 'Scheduled task test'));
+    expect(automationRequest).toBeTruthy();
+    expect(automationRequest.model).toBe('automation-model');
     expect(scheduledChats).toHaveLength(1);
     expect(scheduledChats[0]).toMatchObject({ automationId, title: 'Scheduled: Run a scheduled test' });
     const detail = await nativeFetch(`${baseUrl}/api/chats/${scheduledChats[0].id}`, { headers: apiHeaders() }).then(response => response.json());

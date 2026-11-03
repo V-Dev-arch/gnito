@@ -173,6 +173,15 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_chats_automation ON chats(automation_id, updated_at DESC);
     `,
   },
+  {
+    version: 3,
+    name: 'automation provider and model selection',
+    sql: `
+      ALTER TABLE automations ADD COLUMN provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL;
+      ALTER TABLE automations ADD COLUMN model_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_automations_provider ON automations(provider_id);
+    `,
+  },
 ];
 
 function migrate(db: Db): void {

@@ -230,10 +230,10 @@ export function registerBackupRoutes(app: any): void {
           const exists = db.prepare('SELECT id FROM automations WHERE id = ?').get(a.id);
           if (exists && !overwrite) continue;
           db.prepare(`INSERT OR REPLACE INTO automations
-            (id, prompt, schedule, task_instruction, status, missed_run_policy, dry_run,
+            (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
              max_steps, max_retries, retry_backoff_ms, created_at, updated_at, next_run_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .run(a.id, a.prompt, a.schedule, a.task_instruction, 'paused', a.missed_run_policy, a.dry_run,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(a.id, a.prompt, a.schedule, a.task_instruction, a.provider_id ?? null, a.model_id ?? null, 'paused', a.missed_run_policy, a.dry_run,
               a.max_steps, a.max_retries, a.retry_backoff_ms, a.created_at, Date.now(), null);
           applied.automations++;
         }

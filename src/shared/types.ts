@@ -170,6 +170,9 @@ export const AutomationSchema = z.object({
   schedule: AutomationScheduleSchema,
   /** What the model will be asked to do, derived from prompt + clarifications. */
   taskInstruction: z.string().max(10000),
+  /** Provider and model used exclusively by this automation. */
+  providerId: z.string().min(1).optional(),
+  modelId: z.string().min(1).max(200).optional(),
   status: AutomationStatusSchema.default('draft'),
   /** Missed-run policy when the service was down. */
   missedRunPolicy: MissedRunPolicySchema.default('skip'),
