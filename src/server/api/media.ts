@@ -24,16 +24,16 @@ function descriptorRoot(): string | null {
   return root && fs.existsSync(root) && fs.constants.O_DIRECTORY && fs.constants.O_NOFOLLOW ? root : null;
 }
 
-function openGeneratedPng(id: string): { fd: number; size: number } | null {
+function openGeneratedFile(id: string, extension: 'png' | 'svg', maxBytes: number): { fd: number; size: number } | null {
   const procFd = descriptorRoot();
   if (!procFd) return null;
   let directoryFd: number | undefined;
   let fileFd: number | undefined;
   try {
     directoryFd = fs.openSync(generatedDir(), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-    fileFd = fs.openSync(`${procFd}/${directoryFd}/${id}.png`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK || 0));
+    fileFd = fs.openSync(`${procFd}/${directoryFd}/${id}.${extension}`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK || 0));
     const stats = fs.fstatSync(fileFd);
-    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_GENERATED_IMAGE_BYTES) return null;
+    if (!stats.isFile() || stats.size <= 0 || stats.size > maxBytes) return null;
     const result = { fd: fileFd, size: stats.size };
     fileFd = undefined;
     return result;
@@ -65,6 +65,20 @@ export function storeGeneratedPng(encoded: string): { id: string; url: string } 
   if (totalBytes + bytes.length > MAX_GENERATED_STORAGE_BYTES) throw new Error('Local generated-image storage is full (1 GiB limit). Remove generated images before creating more.');
   const id = randomUUID();
   fs.writeFileSync(path.join(directory, `${id}.png`), bytes, { flag: 'wx', mode: 0o600 });
+  return { id, url: `/api/media/${id}` };
+}
+
+export function storeGeneratedSvg(svg: string): { id: string; url: string } {
+  const value = svg.trim();
+  if (!value || Buffer.byteLength(value, 'utf8') > 5 * 1024 * 1024 || !/^<svg(?:\s|>)/i.test(value) || !/<\/svg>\s*$/i.test(value)) {
+    throw new Error('The generated SVG was empty, malformed, or exceeded the 5 MiB limit.');
+  }
+  if (/<script\b|<foreignObject\b|javascript:|\bon\w+\s*=|<iframe\b|<object\b|<embed\b/i.test(value)) {
+    throw new Error('The generated SVG contained unsupported executable content.');
+  }
+  const directory = generatedDir();
+  const id = randomUUID();
+  fs.writeFileSync(path.join(directory, `${id}.svg`), value, { flag: 'wx', mode: 0o600 });
   return { id, url: `/api/media/${id}` };
 }
 
@@ -136,13 +150,14 @@ export function registerMediaRoutes(app: any): void {
     const id = String(req.params.id || '');
     if (!UUID_PATTERN.test(id)) { res.status(404).json({ error: 'not-found' }); return; }
     let media: { fd: number; size: number } | null;
-    try { media = openGeneratedPng(id); }
+    try { media = openGeneratedFile(id, 'png', MAX_GENERATED_IMAGE_BYTES) || openGeneratedFile(id, 'svg', 5 * 1024 * 1024); }
     catch { media = null; }
     if (!media) { res.status(404).json({ error: 'not-found' }); return; }
+    const isSvg = fs.existsSync(path.join(generatedDir(), `${id}.svg`));
     streamPinnedFile(req, res, {
       ...media,
-      contentType: 'image/png',
-      filename: `gnito-${id}.png`,
+      contentType: isSvg ? 'image/svg+xml' : 'image/png',
+      filename: `gnito-${id}.${isSvg ? 'svg' : 'png'}`,
       cacheControl: 'private, max-age=3600',
     });
   });

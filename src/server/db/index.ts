@@ -164,6 +164,15 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
     `,
   },
+  {
+    version: 2,
+    name: 'automation chat metadata',
+    sql: `
+      ALTER TABLE chats ADD COLUMN automation_id TEXT REFERENCES automations(id) ON DELETE SET NULL;
+      ALTER TABLE chats ADD COLUMN automation_run_id TEXT REFERENCES automation_runs(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_chats_automation ON chats(automation_id, updated_at DESC);
+    `,
+  },
 ];
 
 function migrate(db: Db): void {

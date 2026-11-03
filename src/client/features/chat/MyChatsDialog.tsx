@@ -8,12 +8,13 @@ interface Project { id: string; name: string }
 
 interface Props {
   open: boolean;
+  mode?: 'all' | 'scheduled';
   currentChatId?: string;
   onClose: () => void;
   onDeleted: (chatId: string) => void;
 }
 
-export function MyChatsDialog({ open, currentChatId, onClose, onDeleted }: Props) {
+export function MyChatsDialog({ open, mode = 'all', currentChatId, onClose, onDeleted }: Props) {
   const [status, setStatus] = useState<'active' | 'archived'>('active');
   const [chats, setChats] = useState<Chat[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -33,13 +34,13 @@ export function MyChatsDialog({ open, currentChatId, onClose, onDeleted }: Props
     setLoading(true);
     setError('');
     try {
-      setChats(await api.get(`/api/chats?status=${status}`) as Chat[]);
+      setChats(await api.get(`/api/chats?status=${status}${mode === 'scheduled' ? '&automation=1' : ''}`) as Chat[]);
     } catch (e: any) {
       setError(`Could not load chats: ${e.message}`);
     } finally {
       setLoading(false);
     }
-  }, [status]);
+  }, [status, mode]);
 
   useEffect(() => {
     if (!open) return;
@@ -121,11 +122,11 @@ export function MyChatsDialog({ open, currentChatId, onClose, onDeleted }: Props
 
   return (
     <div className="my-chats-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-      <section ref={dialogRef} className="my-chats-dialog" role="dialog" aria-modal="true" aria-labelledby="my-chats-title" onKeyDown={trapDialogFocus} data-testid="dialog-my-chats">
+      <section ref={dialogRef} className="my-chats-dialog" role="dialog" aria-modal="true" aria-labelledby={mode === 'scheduled' ? 'scheduled-tasks-title' : 'my-chats-title'} onKeyDown={trapDialogFocus} data-testid={mode === 'scheduled' ? 'dialog-scheduled-tasks' : 'dialog-my-chats'}>
         <header className="my-chats-header">
           <div className="my-chats-heading">
             <span className="my-chats-icon"><MessageSquare size={18} /></span>
-            <div><h2 id="my-chats-title">My Chats</h2><p>Find and manage your saved conversations.</p></div>
+            <div><h2 id={mode === 'scheduled' ? 'scheduled-tasks-title' : 'my-chats-title'}>{mode === 'scheduled' ? 'Scheduled Tasks' : 'My Chats'}</h2><p>{mode === 'scheduled' ? 'Conversations created by your automations.' : 'Find and manage your saved conversations.'}</p></div>
           </div>
           <button ref={closeRef} className="btn btn-ghost btn-icon" onClick={onClose} aria-label="Close My Chats" data-testid="button-close-my-chats"><X size={18} /></button>
         </header>
@@ -136,12 +137,12 @@ export function MyChatsDialog({ open, currentChatId, onClose, onDeleted }: Props
             <button role="tab" aria-selected={status === 'archived'} className={status === 'archived' ? 'active' : ''} onClick={() => setStatus('archived')} data-testid="tab-archived-chats"><Archive size={14} /> Archived</button>
           </div>
           <label className="my-chats-search"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search chats…" aria-label="Search chats" data-testid="input-search-chats" /></label>
-          <Link href="/" className="btn btn-primary btn-sm" onClick={onClose} data-testid="button-my-chats-new"><Plus size={14} /> New chat</Link>
+          {mode === 'all' && <Link href="/" className="btn btn-primary btn-sm" onClick={onClose} data-testid="button-my-chats-new"><Plus size={14} /> New chat</Link>}
         </div>
 
         {error && <div className="my-chats-error" role="alert" data-testid="my-chats-error">{error}</div>}
         <div className="my-chats-list" aria-live="polite" aria-busy={loading}>
-          {loading ? <div className="my-chats-empty"><LoaderCircle size={18} className="spin" /> Loading chats…</div> : visibleChats.length === 0 ? <div className="my-chats-empty">{query ? 'No chats match that search.' : status === 'archived' ? 'No archived chats yet.' : 'No saved chats yet.'}</div> : visibleChats.map(chat => {
+          {loading ? <div className="my-chats-empty"><LoaderCircle size={18} className="spin" /> Loading chats…</div> : visibleChats.length === 0 ? <div className="my-chats-empty">{query ? 'No chats match that search.' : status === 'archived' ? `No archived ${mode === 'scheduled' ? 'scheduled tasks' : 'chats'} yet.` : `No ${mode === 'scheduled' ? 'scheduled task chats' : 'saved chats'} yet.`}</div> : visibleChats.map(chat => {
             const project = projects.find(item => item.id === chat.projectId);
             const busy = busyId === chat.id;
             return <article className={`my-chat-row ${currentChatId === chat.id ? 'current' : ''}`} key={chat.id} data-testid={`my-chat-${chat.id}`}>
@@ -179,7 +180,7 @@ export function MyChatsDialog({ open, currentChatId, onClose, onDeleted }: Props
             </article>;
           })}
         </div>
-        <footer className="my-chats-footer"><span>{visibleChats.length} {visibleChats.length === 1 ? 'chat' : 'chats'}</span>{projects.length === 0 && <Link href="/projects" onClick={onClose}>Create a project to organize chats</Link>}</footer>
+        <footer className="my-chats-footer"><span>{visibleChats.length} {visibleChats.length === 1 ? 'chat' : 'chats'}</span>{mode === 'all' && projects.length === 0 && <Link href="/projects" onClick={onClose}>Create a project to organize chats</Link>}</footer>
       </section>
     </div>
   );

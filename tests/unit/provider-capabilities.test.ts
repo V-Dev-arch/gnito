@@ -16,9 +16,9 @@ describe('Image tools provider capability', () => {
     }
   });
 
-  it('allows custom-compatible endpoints and rejects unsupported provider kinds', () => {
+  it('allows every agent-loop provider and rejects unsupported provider kinds', () => {
     expect(supportsImageTools({ kind: 'custom' })).toBe(true);
-    expect(supportsImageTools({ kind: 'anthropic-compatible' })).toBe(false);
+    expect(supportsImageTools({ kind: 'anthropic-compatible' })).toBe(true);
     expect(supportsImageTools({ kind: 'manus-agent' })).toBe(false);
     expect(supportsImageTools()).toBe(false);
   });

@@ -71,6 +71,11 @@ beforeAll(async () => {
       } }] }));
       return;
     }
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Scheduled task test')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Scheduled result confirmed.' } }] }));
+      return;
+    }
     if (req.url?.includes('/images/generations')) {
       if (req.url !== '/v1/images/generations') {
         res.writeHead(404, { 'content-type': 'application/json' });
@@ -86,21 +91,21 @@ beforeAll(async () => {
     }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (!body.messages.some((message: any) => message.role === 'tool')) {
-      const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'generate_image');
-      if (imageTool) expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+      const imageTool = body.tools?.some((tool: any) => tool.function?.name === 'create_image');
+      if (imageTool) expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'create_image' } });
       else expect(body.tool_choice).toBe('auto');
-      const tool = imageTool ? 'generate_image' : 'terminal_run';
+      const tool = imageTool ? 'create_image' : 'terminal_run';
       expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
       const properties = body.tools.find((entry: any) => entry.function?.name === tool).function.parameters.properties;
-      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'model', 'size']);
+      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'svg']);
       else expect(Object.keys(properties)).toEqual(['command']);
       const asksForUrlImage = body.messages.some((message: any) => message.role === 'user' && (message.content === 'Create a URL image.' || message.content === 'I want an image of a mountain cabin at sunset.'));
-      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : 'A test image', model: 'gpt-image-1', size: '1024x1024' } : { command: 'pwd && ls -la' };
+      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : 'A test image', svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="navy"/><circle cx="50" cy="50" r="30" fill="cyan"/></svg>' } : { command: 'pwd && ls -la' };
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
       const toolMessage = body.messages.find((message: any) => message.role === 'tool');
       expect(toolMessage).toBeTruthy();
-      const imageTool = toolMessage.tool_call_id === 'tool-call-generate_image';
+      const imageTool = toolMessage.tool_call_id === 'tool-call-create_image';
       if (imageTool) expect(toolMessage.content).toContain('/api/media/');
       else expect(toolMessage.tool_call_id).toBe('tool-call-terminal_run');
       const finalText = imageTool ? JSON.parse(toolMessage.content).output.markdown : 'The sandbox reported its Docker runtime status.';
@@ -220,12 +225,12 @@ describe('autonomous terminal tool loop', () => {
     expect(mediaPath).toBeTruthy();
     const preview = await nativeFetch(`${baseUrl}${mediaPath}`, { headers: { 'X-Gnito-Session': session.token, 'X-Gnito-CSRF': session.csrf } });
     expect(preview.status).toBe(200);
-    expect(preview.headers.get('content-type')).toContain('image/png');
+    expect(preview.headers.get('content-type')).toContain('image/svg+xml');
     const blocked = await nativeFetch(`${baseUrl}${mediaPath}`);
     expect(blocked.status).toBe(401);
   });
 
-  it('forces the image tool for natural image requests and imports URL-based Images API output', async () => {
+  it('forces the local image tool for natural image requests', async () => {
     const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock URL Images provider', baseUrl: openAiUrl, apiKey: 'test-openai-key', enabled: true });
     const requestStart = openAiRequests.length;
     const response = await sendChat(providerId, {
@@ -234,9 +239,35 @@ describe('autonomous terminal tool loop', () => {
     });
     expect(response.status).toBe(200);
     const stream = await response.text();
-    expect(openAiRequests.slice(requestStart)[0].tool_choice).toEqual({ type: 'function', function: { name: 'generate_image' } });
+    expect(openAiRequests.slice(requestStart)[0].tool_choice).toEqual({ type: 'function', function: { name: 'create_image' } });
     expect(stream).toContain('event: media');
     expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
+  });
+
+  it('runs an automation and persists its result as a Scheduled Tasks chat', async () => {
+    const automation = await nativeFetch(`${baseUrl}/api/automations`, {
+      method: 'POST', headers: apiHeaders(true), body: JSON.stringify({
+        prompt: 'Run a scheduled test',
+        schedule: { expression: '0 0 1 1 *', timezone: 'UTC', kind: 'recurring' },
+        taskInstruction: 'Scheduled task test',
+      }),
+    });
+    expect(automation.status).toBe(201);
+    const automationId = (await automation.json() as { id: string }).id;
+    const runNow = await nativeFetch(`${baseUrl}/api/automations/${automationId}/run-now`, { method: 'POST', headers: apiHeaders(true) });
+    expect(runNow.status).toBe(200);
+    let scheduledChats: any[] = [];
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      scheduledChats = await nativeFetch(`${baseUrl}/api/chats?automation=1`, { headers: apiHeaders() }).then(response => response.json());
+      if (scheduledChats.length) break;
+    }
+    expect(scheduledChats).toHaveLength(1);
+    expect(scheduledChats[0]).toMatchObject({ automationId, title: 'Scheduled: Run a scheduled test' });
+    const detail = await nativeFetch(`${baseUrl}/api/chats/${scheduledChats[0].id}`, { headers: apiHeaders() }).then(response => response.json());
+    expect(detail.messages.map((message: any) => message.content)).toEqual(['Scheduled task test', 'Scheduled result confirmed.']);
+    const normalChats = await nativeFetch(`${baseUrl}/api/chats`, { headers: apiHeaders() }).then(response => response.json());
+    expect(normalChats.some((chat: any) => chat.id === scheduledChats[0].id)).toBe(false);
   });
 
   it('routes Manus through the documented async task API and returns real status/final task text', async () => {

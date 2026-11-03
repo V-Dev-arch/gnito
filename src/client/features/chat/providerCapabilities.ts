@@ -2,7 +2,7 @@ export interface ImageToolProvider {
   kind: string;
 }
 
-/** Image tools use the OpenAI-compatible Images API adapter, not provider URL heuristics. */
+/** Image tools are local AI-authored SVG creation, so they do not require an Images API. */
 export function supportsImageTools(provider?: ImageToolProvider): boolean {
-  return provider?.kind === 'custom' || provider?.kind === 'openai-compatible';
+  return Boolean(provider && provider.kind !== 'manus-agent');
 }

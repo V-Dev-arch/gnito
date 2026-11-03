@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff, MessagesSquare } from 'lucide-react';
+import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff, MessagesSquare, CalendarClock } from 'lucide-react';
 import { api } from '../lib/api';
 import { MyChatsDialog } from '../features/chat/MyChatsDialog';
 
@@ -26,6 +26,7 @@ const NAV = [
 export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }: Props) {
   const [location, setLocation] = useLocation();
   const [myChatsOpen, setMyChatsOpen] = useState(false);
+  const [scheduledTasksOpen, setScheduledTasksOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<'checking' | 'online' | 'offline'>('checking');
@@ -33,6 +34,7 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
   const mainRef = useRef<HTMLElement>(null);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const myChatsButtonRef = useRef<HTMLButtonElement>(null);
+  const scheduledTasksButtonRef = useRef<HTMLButtonElement>(null);
   const previousLocationRef = useRef(location);
   const mobileOpenRef = useRef(mobileOpen);
   mobileOpenRef.current = mobileOpen;
@@ -47,6 +49,10 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
   const closeMyChats = useCallback(() => {
     setMyChatsOpen(false);
     window.requestAnimationFrame(() => (isMobile ? mobileMenuButtonRef.current : myChatsButtonRef.current)?.focus());
+  }, [isMobile]);
+  const closeScheduledTasks = useCallback(() => {
+    setScheduledTasksOpen(false);
+    window.requestAnimationFrame(() => (isMobile ? mobileMenuButtonRef.current : scheduledTasksButtonRef.current)?.focus());
   }, [isMobile]);
   const trapMobileFocus = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     if (!isMobile || !mobileOpen || event.key !== 'Tab') return;
@@ -162,6 +168,9 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
             <button ref={myChatsButtonRef} className="sidebar-link" onClick={() => { setMyChatsOpen(true); if (isMobile) closeMobileMenu(); }} data-testid="button-my-chats">
               <MessagesSquare size={18} /><span className="sidebar-label">My Chats</span>
             </button>
+            <button ref={scheduledTasksButtonRef} className="sidebar-link" onClick={() => { setScheduledTasksOpen(true); if (isMobile) closeMobileMenu(); }} data-testid="button-scheduled-tasks">
+              <CalendarClock size={18} /><span className="sidebar-label">Scheduled Tasks</span>
+            </button>
           </div>
         </nav>
 
@@ -225,6 +234,13 @@ export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }
         open={myChatsOpen}
         currentChatId={currentChatId}
         onClose={closeMyChats}
+        onDeleted={chatId => { if (currentChatId === chatId) setLocation('/'); }}
+      />
+      <MyChatsDialog
+        open={scheduledTasksOpen}
+        mode="scheduled"
+        currentChatId={currentChatId}
+        onClose={closeScheduledTasks}
         onDeleted={chatId => { if (currentChatId === chatId) setLocation('/'); }}
       />
     </div>

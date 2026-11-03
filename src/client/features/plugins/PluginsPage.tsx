@@ -72,20 +72,20 @@ export function PluginsPage() {
 
       {error && <div className="card" style={{ borderColor: 'var(--color-error)', marginBottom: 16 }}>{error}</div>}
 
-      <div className="plugin-card" style={{ marginBottom: 16 }} data-testid="plugin-github">
-        <img src="/brand/providers/github.svg" alt="GitHub logo" width="34" height="34" style={{ color: 'var(--color-text)' }} />
-        <div style={{ flex: 1 }}>
+      <div className="plugin-card github-plugin-card" data-testid="plugin-github">
+        <div className="github-plugin-mark"><img src="/brand/providers/github.svg" alt="GitHub logo" width="32" height="32" /></div>
+        <div className="github-plugin-main">
           <div className="plugin-name">GitHub <span style={{ color: 'var(--color-text-faint)' }}>built-in</span></div>
           <div className="plugin-desc">Give the AI GitHub REST API access. GitHub enforces the scopes and fine-grained repository permissions selected when the PAT was created.</div>
           <div className="plugin-permissions"><span className="permission-badge">github:read</span><span className="permission-badge">github:write</span><span className="permission-badge">encrypted PAT</span></div>
           {githubStatus?.connected && <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginTop: 6 }}>Connected as <strong>{githubStatus.login || 'GitHub user'}</strong>{githubStatus.scopes?.length ? ` · token scopes: ${githubStatus.scopes.join(', ')}` : ' · fine-grained permissions are enforced per request'}</div>}
-          <div className="field-row" style={{ marginTop: 10 }}>
+          <div className="field-row github-plugin-connect-row">
             <div className="field"><input className="input" type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="ghp_… or github_pat_…" aria-label="GitHub personal access token" data-testid="input-github-token" /></div>
             <button className="btn btn-primary" onClick={() => void connectGithub()} disabled={githubBusy || !githubToken.trim()} data-testid="button-connect-github">{githubBusy ? 'Connecting…' : 'Connect GitHub'}</button>
           </div>
           <div className="card-description" style={{ marginTop: 6 }}>Create a classic or fine-grained PAT on GitHub with only the repository, issue, pull request, or workflow access you want Gnito to use. The token is never sent to the model.</div>
         </div>
-        {githubStatus?.connected && <button className="btn btn-danger btn-sm" onClick={() => void disconnectGithub()} disabled={githubBusy} data-testid="button-disconnect-github">Disconnect</button>}
+        {githubStatus?.connected && <div className="github-plugin-actions"><button className="btn btn-danger btn-sm" onClick={() => void disconnectGithub()} disabled={githubBusy} data-testid="button-disconnect-github">Disconnect</button></div>}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>

@@ -307,6 +307,18 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
   const automation = db.prepare('SELECT * FROM automations WHERE id = ?').get(automationId) as any;
   if (!automation) return;
 
+  const chatId = randomUUID();
+  const now = Date.now();
+  const title = `Scheduled: ${String(automation.prompt || automation.task_instruction).replace(/\s+/g, ' ').trim().slice(0, 280) || 'Automation run'}`;
+  db.prepare(`
+    INSERT INTO chats (id, project_id, title, status, created_at, updated_at, automation_id, automation_run_id)
+    VALUES (?,?,?,?,?,?,?,?)
+  `).run(chatId, null, title, 'active', now, now, automationId, runId);
+  db.prepare(`
+    INSERT INTO messages (id, chat_id, role, content, created_at)
+    VALUES (?,?,?,?,?)
+  `).run(randomUUID(), chatId, 'user', automation.task_instruction, now);
+
   try {
     // Use the user's saved default model (or first enabled provider).
     const defaultModelRow = db.prepare("SELECT value FROM settings WHERE key = 'composer.defaultModel'").get() as any;
@@ -320,8 +332,8 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
     const apiKey = getProviderSecret(provider.id) || '';
     const baseUrl = provider.base_url.replace(/\/+$/, '');
     const url = provider.kind === 'anthropic-compatible'
-      ? `${baseUrl}/v1/messages`
-      : `${baseUrl}/chat/completions`;
+      ? (/(?:\/v1)?\/messages$/i.test(baseUrl) ? baseUrl : `${baseUrl}/v1/messages`)
+      : (/\/chat\/completions$/i.test(baseUrl) ? baseUrl : `${baseUrl}/chat/completions`);
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -354,6 +366,11 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
     const summary = provider.kind === 'anthropic-compatible'
       ? json?.content?.[0]?.text || ''
       : json?.choices?.[0]?.message?.content || '';
+    const assistantText = String(summary || 'The scheduled task completed without a text response.');
+    db.prepare(`
+      INSERT INTO messages (id, chat_id, role, content, provider_id, model_id, created_at)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(randomUUID(), chatId, 'assistant', assistantText, provider.id, body.model, Date.now());
 
     db.prepare(`
       UPDATE automation_runs
@@ -361,11 +378,14 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
       WHERE id=?
     `).run(Date.now(), truncateForLog(summary, 10_000), runId);
   } catch (e: any) {
+    const errorText = `Scheduled task failed: ${redactSecrets(truncateForLog(e?.message || 'Execution failed', 2_000))}`;
+    db.prepare(`INSERT INTO messages (id, chat_id, role, content, created_at) VALUES (?,?,?,?,?)`)
+      .run(randomUUID(), chatId, 'assistant', errorText, Date.now());
     db.prepare(`
       UPDATE automation_runs
-      SET status='failed', ended_at=?, error=?, steps_used=1
+      SET status='failed', ended_at=?, error=?, result_summary=?, steps_used=1
       WHERE id=?
-    `).run(Date.now(), truncateForLog(redactSecrets(e?.message || 'Execution failed'), 2000), runId);
+    `).run(Date.now(), truncateForLog(redactSecrets(e?.message || 'Execution failed'), 2000), errorText, runId);
   }
 }
 

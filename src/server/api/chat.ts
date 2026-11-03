@@ -25,9 +25,11 @@ export function registerChatRoutes(app: any): void {
   app.get('/api/chats', (req: Request, res: Response) => {
     const status = req.query.status === 'archived' ? 'archived' : 'active';
     const projectId = req.query.projectId ? String(req.query.projectId) : null;
+    const automationOnly = req.query.automation === '1';
     let sql = `SELECT * FROM chats WHERE status = ?`;
     const params: any[] = [status];
     if (projectId) { sql += ` AND project_id = ?`; params.push(projectId); }
+    sql += automationOnly ? ` AND automation_id IS NOT NULL` : ` AND automation_id IS NULL`;
     sql += ` ORDER BY updated_at DESC LIMIT 500`;
     const rows = db.prepare(sql).all(...params) as any[];
     res.json(rows.map(r => ({
@@ -37,6 +39,8 @@ export function registerChatRoutes(app: any): void {
       status: r.status,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      automationId: r.automation_id ?? null,
+      automationRunId: r.automation_run_id ?? null,
     })));
   });
 
@@ -56,7 +60,7 @@ export function registerChatRoutes(app: any): void {
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
     const messages = db.prepare(`SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC, id ASC`).all(req.params.id) as any[];
     res.json({
-      chat: { id: row.id, projectId: row.project_id, title: row.title, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at },
+      chat: { id: row.id, projectId: row.project_id, title: row.title, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, automationId: row.automation_id ?? null, automationRunId: row.automation_run_id ?? null },
       messages: messages.map(m => ({
         id: m.id, role: m.role, content: m.content, providerId: m.provider_id,
         modelId: m.model_id, usage: m.usage ? JSON.parse(m.usage) : undefined, createdAt: m.created_at,
