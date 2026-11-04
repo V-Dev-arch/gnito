@@ -51,6 +51,11 @@ beforeAll(async () => {
     }
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    if (req.url?.includes('/images/edits')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/OQAAAABJRU5ErkJggg==' }] }));
+      return;
+    }
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     openAiRequests.push(body);
     if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Incremental stream test')) {
@@ -97,10 +102,11 @@ beforeAll(async () => {
       const tool = imageTool ? 'create_image' : 'terminal_run';
       expect(body.tools?.some((entry: any) => entry.function?.name === tool)).toBe(true);
       const properties = body.tools.find((entry: any) => entry.function?.name === tool).function.parameters.properties;
-      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'svg']);
+      if (imageTool) expect(Object.keys(properties)).toEqual(['prompt', 'style', 'quality', 'aspect_ratio', 'negative_prompt', 'svg']);
       else expect(Object.keys(properties)).toEqual(['command']);
       const asksForUrlImage = body.messages.some((message: any) => message.role === 'user' && (message.content === 'Create a URL image.' || message.content === 'I want an image of a mountain cabin at sunset.'));
-      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : 'A test image', svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="navy"/><circle cx="50" cy="50" r="30" fill="cyan"/></svg>' } : { command: 'pwd && ls -la' };
+      const asksForHighFidelity = body.messages.some((message: any) => message.role === 'user' && JSON.stringify(message.content).includes('high fidelity reference image'));
+      const args = imageTool ? { prompt: asksForUrlImage ? 'A URL image' : asksForHighFidelity ? 'A photorealistic astronaut cat' : 'A test image', ...(asksForHighFidelity ? { quality: 'high', style: 'photorealistic cinematic', aspect_ratio: '16:9' } : {}), svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="navy"/><circle cx="50" cy="50" r="30" fill="cyan"/></svg>' } : { command: 'pwd && ls -la' };
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `tool-call-${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } }] }));
     } else {
       const toolMessage = body.messages.find((message: any) => message.role === 'tool');
@@ -242,6 +248,19 @@ describe('autonomous terminal tool loop', () => {
     expect(openAiRequests.slice(requestStart)[0].tool_choice).toEqual({ type: 'function', function: { name: 'create_image' } });
     expect(stream).toContain('event: media');
     expect(stream).toMatch(/!\[Generated image\]\(\/api\/media\/[0-9a-f-]+\)/i);
+  });
+
+  it('uses the raster image endpoint and forwards an attached reference image', async () => {
+    const providerId = await createProvider({ kind: 'openai-compatible', label: 'Mock raster provider', baseUrl: openAiUrl, apiKey: 'test-key', enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', allowImageTools: true, messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Create a high fidelity reference image.' },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/' } },
+      ] }],
+    });
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    expect(stream).toMatch(/event: media[\s\S]*\/api\/media\/[0-9a-f-]+/i);
   });
 
   it('runs an automation and persists its result as a Scheduled Tasks chat', async () => {

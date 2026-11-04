@@ -20,7 +20,7 @@ import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
 import { executeAgentTerminal, executeGitHubTool } from './tools.js';
-import { storeGeneratedSvg } from './media.js';
+import { storeGeneratedPng, storeGeneratedSvg } from './media.js';
 
 const db = getDb();
 const MANUS_API_ROOT = 'https://api.manus.ai';
@@ -289,9 +289,10 @@ export function registerProviderRoutes(app: any): void {
       };
 
       if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools) {
+        const referenceImages = extractImageDataUrls(body.messages);
         const text = row.kind === 'anthropic-compatible'
-          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
@@ -573,14 +574,18 @@ const ANTHROPIC_GITHUB_TOOL = {
 
 const ANTHROPIC_IMAGE_TOOL = {
   name: 'create_image',
-  description: 'Create one image locally without an image API. Return a polished self-contained SVG in the svg argument; no scripts, event handlers, foreignObject, external URLs, or HTML.',
+  description: 'Create one polished, high-fidelity image. Prefer a realistic raster image through the configured image provider; include svg only as a fallback for providers without image generation. Match any attached reference image in composition, lighting, color palette, and subject identity without copying unwanted content.',
   input_schema: {
     type: 'object',
     properties: {
       prompt: { type: 'string', description: 'Detailed visual description.' },
-      svg: { type: 'string', description: 'Complete self-contained SVG markup.' },
+      style: { type: 'string', description: 'Visual direction such as photorealistic, cinematic, editorial, or 3D render.' },
+      quality: { type: 'string', enum: ['standard', 'high'], description: 'Requested rendering quality.' },
+      aspect_ratio: { type: 'string', enum: ['1:1', '4:3', '3:2', '16:9', '9:16'], description: 'Target composition ratio.' },
+      negative_prompt: { type: 'string', description: 'Unwanted artifacts or elements.' },
+      svg: { type: 'string', description: 'Optional self-contained SVG fallback.' },
     },
-    required: ['prompt', 'svg'],
+    required: ['prompt'],
   },
 };
 
@@ -590,19 +595,23 @@ const IMAGE_TOOL = {
   type: 'function',
   function: {
     name: 'create_image',
-    description: 'Create one image locally with no image API, OpenAI account, or external image provider. When the user asks for an image, design an original self-contained SVG illustration and call this tool with the complete SVG markup. Do not put scripts, event handlers, foreignObject, external URLs, or embedded HTML in the SVG. Gnito sanitizes and stores the SVG and returns a Markdown image link.',
+    description: 'Create one polished high-fidelity image. Use the configured provider image endpoint for a realistic raster image when available; attached images are reference images for style, composition, lighting, and subject—not to be ignored. Use a self-contained SVG only when raster generation is unavailable. Never return a generic placeholder cityscape.',
     parameters: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'Detailed visual description of the requested image.' },
-        svg: { type: 'string', description: 'Complete self-contained SVG markup for the image. Use a viewBox, gradients, shapes, paths, and text as needed.' },
+        style: { type: 'string', description: 'Visual direction, preferably including photorealistic/cinematic details.' },
+        quality: { type: 'string', enum: ['standard', 'high'], description: 'Requested rendering quality.' },
+        aspect_ratio: { type: 'string', enum: ['1:1', '4:3', '3:2', '16:9', '9:16'], description: 'Target composition ratio.' },
+        negative_prompt: { type: 'string', description: 'Unwanted artifacts or elements.' },
+        svg: { type: 'string', description: 'Optional self-contained SVG fallback.' },
       },
       required: ['prompt'],
     },
   },
 };
 
-const IMAGE_TOOL_POLICY = 'A local image-creation tool is available because the user explicitly enabled Image tools. It does not use OpenAI, an image API, or an external image provider. When an image is requested, design a polished self-contained SVG and call create_image with both a concise prompt and the complete SVG. After success, include the exact returned Markdown image link in your final answer. Never return only SVG code when the tool is available.';
+const IMAGE_TOOL_POLICY = 'An advanced image-creation tool is available because the user explicitly enabled Image tools. Prefer a high-fidelity raster result from the configured provider image endpoint. Treat attached images as references: preserve the requested subject and borrow only the requested style, composition, lighting, lens, and palette. Include a detailed prompt, style, quality, aspect ratio, and negative prompt. Use SVG only as a provider-compatibility fallback, never as the primary route for photorealistic requests. After success, include the exact returned Markdown image link.';
 const GITHUB_TOOL = {
   type: 'function',
   function: {
@@ -622,6 +631,7 @@ const GITHUB_TOOL = {
 const GITHUB_TOOL_POLICY = 'A GitHub plugin is connected. Use github_api for GitHub work instead of asking the user to paste tokens or using terminal credentials. GitHub itself enforces the PAT scopes and fine-grained repository permissions. Explain write or destructive actions before making them, and never claim success unless the tool result confirms it.';
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
+  provider: any; apiKey: string; referenceImages: string[];
   chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; forceImageGeneration: boolean;
   send: AgentSend;
 }): Promise<string> {
@@ -658,7 +668,7 @@ async function runOpenAIAgent(options: {
       if (round === 0 && options.forceImageGeneration && options.allowImageTools) {
         options.send('activity', { message: 'The provider rejected tool chat; using the image tool directly…' });
         const prompt = providerText([...options.body.messages].reverse().find(message => message.role === 'user')?.content).trim();
-        const fallback = await createLocalImage({ prompt }, options.signal);
+        const fallback = await createLocalImage({ prompt, quality: 'high' }, options.signal, options);
         if (fallback.output) {
           options.send('media', fallback.output);
           return fallback.output.markdown || '';
@@ -686,7 +696,7 @@ async function runOpenAIAgent(options: {
           if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
           imageCount++;
           options.send('activity', { message: 'Creating the image locally…' });
-          result = await createLocalImage(args, options.signal);
+          result = await createLocalImage(args, options.signal, options);
           if (result.output) options.send('media', result.output);
           else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
         } else if (call.function?.name === 'github_api' && options.allowGitHubTools) {
@@ -703,35 +713,78 @@ async function runOpenAIAgent(options: {
   throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
 }
 
-async function createLocalImage(input: unknown, signal: AbortSignal): Promise<{ output?: any; error?: string }> {
+async function createLocalImage(input: unknown, signal: AbortSignal, context?: { provider: any; apiKey: string; referenceImages: string[] }): Promise<{ output?: any; error?: string }> {
   const schema = z.object({
     prompt: z.string().trim().min(1).max(2_000),
+    style: z.string().trim().max(1_000).optional(),
+    quality: z.enum(['standard', 'high']).default('standard'),
+    aspect_ratio: z.enum(['1:1', '4:3', '3:2', '16:9', '9:16']).default('16:9'),
+    negative_prompt: z.string().trim().max(1_000).optional(),
     svg: z.string().trim().max(5_000_000).optional(),
   });
   const parsed = schema.safeParse(input);
   if (!parsed.success) return { error: 'The image-generation request was invalid.' };
   if (signal.aborted) return { error: 'Image creation was cancelled.' };
   const prompt = parsed.data.prompt;
-  const svg = parsed.data.svg || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#101b45"/><stop offset="1" stop-color="#35b8d4"/></linearGradient></defs><rect width="1200" height="800" fill="url(#sky)"/><circle cx="950" cy="150" r="82" fill="#f5f0c8" opacity=".9"/><path d="M0 610L120 470 240 590 370 410 520 600 700 350 880 600 1030 450 1200 610V800H0Z" fill="#13243e"/><path d="M0 690L180 560 330 680 510 510 680 700 850 530 1010 690 1170 560 1200 590V800H0Z" fill="#091329"/><text x="600" y="740" text-anchor="middle" fill="#e8fbff" font-family="sans-serif" font-size="28">${escapeSvgText(prompt.slice(0, 80))}</text></svg>`;
+  const polishedPrompt = [prompt, parsed.data.style, parsed.data.negative_prompt ? `Avoid: ${parsed.data.negative_prompt}` : ''].filter(Boolean).join('\n');
   try {
+    if (context && (parsed.data.quality === 'high' || context.referenceImages.length > 0 || !parsed.data.svg)) {
+      const raster = await generateProviderImage({ ...parsed.data, prompt: polishedPrompt }, context, signal);
+      if (raster) return { output: raster };
+    }
+    const svg = parsed.data.svg || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#101b45"/><stop offset="1" stop-color="#35b8d4"/></linearGradient></defs><rect width="1200" height="800" fill="url(#sky)"/><circle cx="950" cy="150" r="82" fill="#f5f0c8" opacity=".9"/><path d="M0 610L120 470 240 590 370 410 520 600 700 350 880 600 1030 450 1200 610V800H0Z" fill="#13243e"/><path d="M0 690L180 560 330 680 510 510 680 700 850 530 1010 690 1170 560 1200 590V800H0Z" fill="#091329"/><text x="600" y="740" text-anchor="middle" fill="#e8fbff" font-family="sans-serif" font-size="28">${escapeSvgText(prompt.slice(0, 80))}</text></svg>`;
     const stored = storeGeneratedSvg(svg);
-    return { output: {
-      kind: 'image',
-      url: stored.url,
-      downloadUrl: `${stored.url}?download=1`,
-      prompt,
-      markdown: `![Generated image](${stored.url})`,
-    } };
+    return { output: { kind: 'image', url: stored.url, downloadUrl: `${stored.url}?download=1`, prompt, markdown: `![Generated image](${stored.url})` } };
   } catch (error: any) {
     return { error: safeProviderError(error, 'Local image creation') };
   }
 }
+
+async function generateProviderImage(input: { prompt: string; style?: string; quality: 'standard' | 'high'; aspect_ratio: string; negative_prompt?: string }, context: { provider: any; apiKey: string; referenceImages: string[] }, signal: AbortSignal): Promise<any | null> {
+  if (!['openai-compatible', 'custom'].includes(String(context.provider?.kind || ''))) return null;
+  const size = ({ '1:1': '1024x1024', '4:3': '1024x768', '3:2': '1536x1024', '16:9': '1536x864', '9:16': '864x1536' } as Record<string, string>)[input.aspect_ratio] || '1536x864';
+  const endpoint = appendEndpoint(context.provider.base_url, context.referenceImages.length ? '/images/edits' : '/images/generations');
+  const headers = Object.fromEntries(Object.entries({ ...(context.apiKey ? { Authorization: `Bearer ${context.apiKey}` } : {}), ...JSON.parse(context.provider.custom_headers || '{}') }).filter(([key]) => key.toLowerCase() !== 'content-type')) as Record<string, string>;
+  const prompt = `${input.prompt}${input.style ? `\nStyle: ${input.style}` : ''}`;
+  let response: Awaited<ReturnType<typeof fetch>>;
+  if (context.referenceImages.length) {
+    const image = dataUrlToBlob(context.referenceImages[0]);
+    if (!image) return null;
+    const form = new FormData();
+    form.append('model', 'gpt-image-1'); form.append('prompt', prompt); form.append('size', size); form.append('quality', input.quality); form.append('n', '1'); form.append('image', image, 'reference.png');
+    response = await fetch(endpoint, { method: 'POST', headers, body: form, signal });
+  } else {
+    response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'gpt-image-1', prompt, size, quality: input.quality, n: 1, response_format: 'b64_json' }), signal });
+  }
+  if (!response.ok) { void response.body?.cancel().catch(() => {}); return null; }
+  const json = await response.json().catch(() => null);
+  const item = json?.data?.[0];
+  let encoded = typeof item?.b64_json === 'string' ? item.b64_json : '';
+  if (!encoded && typeof item?.url === 'string' && /^https:\/\//i.test(item.url)) {
+    const imageResponse = await fetch(item.url, { signal });
+    if (imageResponse.ok) encoded = Buffer.from(await imageResponse.arrayBuffer()).toString('base64');
+  }
+  if (!encoded) return null;
+  const stored = storeGeneratedPng(encoded);
+  return { kind: 'image', url: stored.url, downloadUrl: `${stored.url}?download=1`, prompt: input.prompt, markdown: `![Generated image](${stored.url})` };
+}
+
+function dataUrlToBlob(value: string): Blob | null {
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  return match ? new Blob([Buffer.from(match[2], 'base64')], { type: `image/${match[1]}` }) : null;
+}
+
+function extractImageDataUrls(messages: { content: any }[]): string[] {
+  return messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part?.type === 'image_url' && typeof part.image_url?.url === 'string').map(part => part.image_url.url) : []).slice(0, 4);
+}
+
 function escapeSvgText(value: string): string {
   return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character] || character));
 }
 
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
+  provider: any; apiKey: string; referenceImages: string[];
   chatId: string; allowNetwork: boolean; allowImageTools: boolean; allowGitHubTools: boolean; send: AgentSend;
 }): Promise<string> {
   const system = [TERMINAL_TOOL_POLICY, ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []), ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
@@ -756,7 +809,7 @@ async function runAnthropicAgent(options: {
       let result: any;
       try {
         if (call.name === 'create_image' && options.allowImageTools) {
-          result = await createLocalImage(call.input, options.signal);
+          result = await createLocalImage(call.input, options.signal, options);
           if (result.output) options.send('media', result.output);
         } else if (call.name === 'github_api' && options.allowGitHubTools) {
           result = await executeGitHubTool(call.input, options.signal);
