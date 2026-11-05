@@ -3,7 +3,7 @@ import { Archive, FolderPlus, LoaderCircle, MessageSquare, Pencil, Plus, Search,
 import { Link } from 'wouter';
 import { api } from '../../lib/api';
 
-interface Chat { id: string; title: string; projectId: string | null; status: 'active' | 'archived'; updatedAt: number; automationRunStatus?: string | null; automationRuntimeMs?: number | null }
+interface Chat { id: string; title: string; projectId: string | null; status: 'active' | 'archived'; updatedAt: number; automationRunStatus?: string | null; automationEndedAt?: number | null; automationRuntimeMs?: number | null }
 interface Project { id: string; name: string }
 
 interface Props {
@@ -21,6 +21,16 @@ function formatRuntime(runtimeMs?: number | null): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${minutes}m ${remainder}s runtime`;
+}
+
+function formatRanAgo(endedAt?: number | null): string {
+  if (!endedAt) return 'Running now';
+  const seconds = Math.max(0, Math.floor((Date.now() - endedAt) / 1000));
+  if (seconds < 60) return `Ran ${seconds} sec${seconds === 1 ? '' : 's'} ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Ran ${minutes} min${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  return `Ran ${hours} hr${hours === 1 ? '' : 's'} ago`;
 }
 
 export function MyChatsDialog({ open, mode = 'all', currentChatId, onClose, onDeleted }: Props) {
@@ -158,7 +168,7 @@ export function MyChatsDialog({ open, mode = 'all', currentChatId, onClose, onDe
               <div className="my-chat-main">
                 <Link href={`/chats/${chat.id}`} className="my-chat-open" onClick={onClose} title={chat.title}>
                   <MessageSquare size={16} />
-                  <span><strong>{chat.title}</strong><small>{project ? `In ${project.name}` : 'No project'} · {new Date(chat.updatedAt).toLocaleDateString()}{mode === 'scheduled' && <> · {chat.automationRunStatus || 'pending'} · {formatRuntime(chat.automationRuntimeMs)}</>}</small></span>
+                  <span><strong>{chat.title}</strong><small>{project ? `In ${project.name}` : 'No project'} · {new Date(chat.updatedAt).toLocaleDateString()}{mode === 'scheduled' && <> · {chat.automationRunStatus || 'pending'} · {formatRuntime(chat.automationRuntimeMs)} · {formatRanAgo(chat.automationEndedAt)} · {chat.automationEndedAt ? `Ran at ${new Date(chat.automationEndedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Not finished'}</>}</small></span>
                 </Link>
                 <div className="my-chat-actions">
                   <button className="btn btn-secondary btn-sm" onClick={() => { setEditingId(chat.id); setEditingTitle(chat.title); setError(''); }} disabled={busy} aria-label={`Rename ${chat.title}`} data-testid={`button-rename-${chat.id}`}><Pencil size={13} /> Rename</button>
