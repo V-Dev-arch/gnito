@@ -345,16 +345,13 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
 
     const { getProviderSecret } = await import('../security/vault.js');
     const apiKey = getProviderSecret(provider.id) || '';
-    const baseUrl = provider.base_url.replace(/\/+$/, '');
-    const url = provider.kind === 'anthropic-compatible'
-      ? (/(?:\/v1)?\/messages$/i.test(baseUrl) ? baseUrl : `${baseUrl}/v1/messages`)
-      : (/\/chat\/completions$/i.test(baseUrl) ? baseUrl : `${baseUrl}/chat/completions`);
-
+    const url = buildAutomationChatUrl(provider);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...(provider.kind === 'anthropic-compatible'
         ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-        : { Authorization: `Bearer ${apiKey}` }),
+        : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {})),
+      ...parseCustomHeaders(provider.custom_headers),
     };
 
     const selectedPermissions = {
@@ -362,7 +359,7 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
       allowNetwork: !!automation.allow_network && !!automation.allow_terminal,
       allowTools: !!automation.allow_tools,
     };
-    const summary = await runAutomationAgent({ provider, apiKey, url, headers, model: selectedModel, taskInstruction: automation.task_instruction, chatId, permissions: selectedPermissions, signal: AbortSignal.timeout(120_000) });
+    const summary = await runAutomationAgent({ provider, apiKey, url, headers, model: selectedModel, taskInstruction: automation.task_instruction, chatId, permissions: selectedPermissions, maxSteps: Math.max(1, Math.min(Number(automation.max_steps) || 10, 10)), signal: AbortSignal.timeout(120_000) });
     const assistantText = String(summary || 'The scheduled task completed without a text response.');
     db.prepare(`
       INSERT INTO messages (id, chat_id, role, content, provider_id, model_id, created_at)
@@ -388,17 +385,15 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
 
 async function runAutomationAgent(options: {
   provider: any; apiKey: string; url: string; headers: Record<string, string>; model: string;
-  taskInstruction: string; chatId: string; permissions: { allowTerminal: boolean; allowNetwork: boolean; allowTools: boolean }; signal: AbortSignal;
+  taskInstruction: string; chatId: string; permissions: { allowTerminal: boolean; allowNetwork: boolean; allowTools: boolean }; maxSteps: number; signal: AbortSignal;
 }): Promise<string> {
-  const { provider, url, headers, model, taskInstruction, chatId, permissions, signal } = options;
+  const { provider, url, headers, model, taskInstruction, chatId, permissions, maxSteps, signal } = options;
   const baseSystem = `You are Gnito, a local-first AI assistant. Execute this scheduled task and respond concisely.\nAutomation permissions: terminal=${permissions.allowTerminal ? 'on' : 'off'}, network=${permissions.allowNetwork ? 'on' : 'off'}, tools=${permissions.allowTools ? 'on' : 'off'}. Never claim a tool ran unless its result confirms it.`;
   if (provider.kind === 'anthropic-compatible' || !permissions.allowTools || !permissions.allowTerminal) {
     const body = provider.kind === 'anthropic-compatible'
       ? { model, messages: [{ role: 'user', content: `${baseSystem}\n\n${taskInstruction}` }], max_tokens: 2000 }
       : { model, messages: [{ role: 'system', content: baseSystem }, { role: 'user', content: taskInstruction }], max_tokens: 2000 };
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
-    const json = await resp.json();
+    const json = await requestAutomationJson(url, headers, body, signal);
     return String(provider.kind === 'anthropic-compatible' ? json?.content?.[0]?.text || '' : json?.choices?.[0]?.message?.content || '');
   }
 
@@ -411,10 +406,10 @@ async function runAutomationAgent(options: {
       parameters: { type: 'object', properties: { command: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['command'] },
     },
   };
-  for (let round = 0; round < 6; round++) {
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ model, messages, max_tokens: 2000, tools: [terminalTool], tool_choice: 'auto' }), signal });
-    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
-    const json = await resp.json();
+  for (let round = 0; round < maxSteps; round++) {
+    const json = await requestAutomationJson(url, headers, { model, messages, max_tokens: 2000, tools: [terminalTool], tool_choice: 'auto' }, signal, {
+      fallbackMessages: [{ role: 'system', content: `${baseSystem}\nThe provider could not accept the tool-enabled request. Do not use tools; complete the task with the information already available.` }, { role: 'user', content: taskInstruction }],
+    });
     const message = json?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no scheduled-task response.');
     if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return String(message.content || '');
@@ -427,7 +422,55 @@ async function runAutomationAgent(options: {
       messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 30_000) });
     }
   }
-  throw new Error('Scheduled task exceeded its six-step tool limit.');
+  // Some models keep requesting the same tool after a successful result. Ask once
+  // without tools rather than turning a completed run into a hard failure.
+  const finalJson = await requestAutomationJson(url, headers, {
+    model, messages: [{ role: 'system', content: `${baseSystem}\nThe tool budget is exhausted. Do not call tools. Return a concise final answer based on the completed results.` }, { role: 'user', content: taskInstruction }, ...messages.filter(message => message.role === 'tool').slice(-maxSteps)], max_tokens: 2000,
+  }, signal);
+  return String(finalJson?.choices?.[0]?.message?.content || 'The scheduled task completed after reaching its tool budget.');
+}
+
+async function requestAutomationJson(url: string, headers: Record<string, string>, body: any, signal: AbortSignal, options?: { fallbackMessages?: any[] }): Promise<any> {
+  const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    if (response.ok) {
+      const json = await response.json().catch(() => null);
+      if (!json) throw new Error('Provider returned an invalid JSON response.');
+      return json;
+    }
+    lastStatus = response.status;
+    void response.body?.cancel().catch(() => {});
+    if (!transientStatuses.has(response.status) || attempt === 2) break;
+    await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  if (options?.fallbackMessages && [400, 404, 415, 422, 429, 500, 502, 503, 504].includes(lastStatus)) {
+    const fallbackBody = { model: body.model, messages: options.fallbackMessages, max_tokens: body.max_tokens };
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(fallbackBody), signal });
+    if (response.ok) return response.json();
+  }
+  throw new Error(`Provider returned HTTP ${lastStatus}.`);
+}
+
+function buildAutomationChatUrl(provider: any): string {
+  let base = String(provider.base_url || '').replace(/\/+$/, '');
+  base = base.replace(/\/(?:chat\/completions|responses|images\/generations|messages|models)$/i, '');
+  try {
+    const parsed = new URL(base);
+    if (provider.kind !== 'anthropic-compatible' && parsed.hostname.toLowerCase() === 'api.openai.com' && parsed.pathname === '') base += '/v1';
+  } catch { /* Provider validation handles malformed URLs. */ }
+  const endpoint = provider.kind === 'anthropic-compatible' ? '/v1/messages' : '/chat/completions';
+  const path = endpoint.startsWith('/v1/') && /\/v1$/i.test(base) ? endpoint.slice(3) : endpoint;
+  return `${base}${path}`;
+}
+
+function parseCustomHeaders(value: unknown): Record<string, string> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.fromEntries(Object.entries(parsed).filter(([, item]) => typeof item === 'string')) as Record<string, string> : {};
+  } catch { return {}; }
 }
 
 // --------------------------------------------------------------- helpers

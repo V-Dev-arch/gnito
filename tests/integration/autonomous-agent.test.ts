@@ -81,6 +81,26 @@ beforeAll(async () => {
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Scheduled result confirmed.' } }] }));
       return;
     }
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Tool incompatible scheduled task')) {
+      if (body.tools?.length) {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'temporary tool backend unavailable' } }));
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Completed without provider tools.' } }] }));
+      }
+      return;
+    }
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Repeated tool scheduled task')) {
+      if (!body.tools?.length) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Completed after the tool budget.' } }] }));
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `repeat-${body.messages.filter((message: any) => message.role === 'tool').length}`, type: 'function', function: { name: 'terminal_run', arguments: JSON.stringify({ command: 'pwd' }) } }] } }] }));
+      }
+      return;
+    }
     if (req.url?.includes('/images/generations')) {
       if (req.url !== '/v1/images/generations') {
         res.writeHead(404, { 'content-type': 'application/json' });
@@ -294,6 +314,40 @@ describe('autonomous terminal tool loop', () => {
     expect(detail.messages.map((message: any) => message.content)).toEqual(['Scheduled task test', 'Scheduled result confirmed.']);
     const normalChats = await nativeFetch(`${baseUrl}/api/chats`, { headers: apiHeaders() }).then(response => response.json());
     expect(normalChats.some((chat: any) => chat.id === scheduledChats[0].id)).toBe(false);
+  });
+
+  it('falls back when a provider returns 503 for tool-enabled automation requests', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Tool incompatible provider', baseUrl: openAiUrl, apiKey: 'automation-key', enabled: true });
+    const automation = await nativeFetch(`${baseUrl}/api/automations`, {
+      method: 'POST', headers: apiHeaders(true), body: JSON.stringify({
+        prompt: 'Tool incompatible scheduled task', schedule: { expression: '0 0 1 1 *', timezone: 'UTC', kind: 'recurring' },
+        taskInstruction: 'Tool incompatible scheduled task', providerId, modelId: 'automation-model', allowTerminal: true, allowNetwork: true, allowTools: true,
+      }),
+    });
+    const automationId = (await automation.json() as { id: string }).id;
+    await nativeFetch(`${baseUrl}/api/automations/${automationId}/run-now`, { method: 'POST', headers: apiHeaders(true) });
+    let chats: any[] = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      chats = await nativeFetch(`${baseUrl}/api/chats?automation=1`, { headers: apiHeaders() }).then(response => response.json());
+      if (chats.find((chat: any) => chat.automationId === automationId)?.automationRunStatus === 'succeeded') break;
+    }
+    expect(chats.find((chat: any) => chat.automationId === automationId)?.automationRunStatus).toBe('succeeded');
+  });
+
+  it('finalizes a scheduled task when the model repeats a tool call past the budget', async () => {
+    const providerId = await createProvider({ kind: 'custom', label: 'Repeating tool provider', baseUrl: openAiUrl, apiKey: 'automation-key', enabled: true });
+    const automation = await nativeFetch(`${baseUrl}/api/automations`, {
+      method: 'POST', headers: apiHeaders(true), body: JSON.stringify({
+        prompt: 'Repeated tool scheduled task', schedule: { expression: '0 0 1 1 *', timezone: 'UTC', kind: 'recurring' },
+        taskInstruction: 'Repeated tool scheduled task', providerId, modelId: 'automation-model', allowTerminal: true, allowNetwork: false, allowTools: true, maxSteps: 2,
+      }),
+    });
+    const automationId = (await automation.json() as { id: string }).id;
+    await nativeFetch(`${baseUrl}/api/automations/${automationId}/run-now`, { method: 'POST', headers: apiHeaders(true) });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const chats = await nativeFetch(`${baseUrl}/api/chats?automation=1`, { headers: apiHeaders() }).then(response => response.json());
+    expect(chats.find((chat: any) => chat.automationId === automationId)?.automationRunStatus).toBe('succeeded');
   });
 
   it('routes Manus through the documented async task API and returns real status/final task text', async () => {
