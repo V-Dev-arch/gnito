@@ -185,6 +185,9 @@ export const AutomationSchema = z.object({
   /** Retry policy. */
   maxRetries: z.number().int().nonnegative().max(5).default(1),
   retryBackoffMs: z.number().int().nonnegative().max(60_000).default(30_000),
+  allowTerminal: z.boolean().default(false),
+  allowNetwork: z.boolean().default(false),
+  allowTools: z.boolean().default(false),
   /** Concurrency: at most one run per automation at a time. */
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),

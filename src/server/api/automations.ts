@@ -11,6 +11,7 @@ import cron, { type ScheduledTask } from 'node-cron';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { redactSecrets, truncateForLog } from '../security/redact.js';
+import { executeAgentTerminal } from './tools.js';
 
 const db = getDb();
 
@@ -62,6 +63,9 @@ export function registerAutomationRoutes(app: any): void {
       maxSteps: z.number().int().positive().max(50).default(10),
       maxRetries: z.number().int().nonnegative().max(5).default(1),
       retryBackoffMs: z.number().int().nonnegative().max(60_000).default(30_000),
+      allowTerminal: z.boolean().default(false),
+      allowNetwork: z.boolean().default(false),
+      allowTools: z.boolean().default(false),
     }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation', issues: parsed.error.issues }); return; }
     const provider = getSelectedProvider(parsed.data.providerId);
@@ -71,8 +75,8 @@ export function registerAutomationRoutes(app: any): void {
     db.prepare(`
       INSERT INTO automations
         (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
-         max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         max_steps, max_retries, retry_backoff_ms, allow_terminal, allow_network, allow_tools, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id,
       parsed.data.prompt,
@@ -86,6 +90,9 @@ export function registerAutomationRoutes(app: any): void {
       parsed.data.maxSteps,
       parsed.data.maxRetries,
       parsed.data.retryBackoffMs,
+      parsed.data.allowTerminal ? 1 : 0,
+      parsed.data.allowNetwork && parsed.data.allowTerminal ? 1 : 0,
+      parsed.data.allowTools ? 1 : 0,
       now,
       now,
     );
@@ -130,10 +137,11 @@ export function registerAutomationRoutes(app: any): void {
     db.prepare(`
       INSERT INTO automations
         (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
-         max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         max_steps, max_retries, retry_backoff_ms, allow_terminal, allow_network, allow_tools, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(id, row.prompt, row.schedule, row.task_instruction, row.provider_id, row.model_id, 'draft',
-      row.missed_run_policy, row.dry_run, row.max_steps, row.max_retries, row.retry_backoff_ms, now, now);
+      row.missed_run_policy, row.dry_run, row.max_steps, row.max_retries, row.retry_backoff_ms,
+      row.allow_terminal, row.allow_network, row.allow_tools, now, now);
     res.status(201).json({ id });
   });
 
@@ -335,8 +343,6 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
     const selectedModel = String(automation.model_id || '').trim();
     if (!provider || !selectedModel) throw new Error('This automation has no enabled provider and model configured. Edit it in Automation Center before running it.');
 
-    // Note: this is a synchronous, single-shot call (no agent loop yet).
-    // Full agent-loop implementation is tracked in docs/implementation-status.md.
     const { getProviderSecret } = await import('../security/vault.js');
     const apiKey = getProviderSecret(provider.id) || '';
     const baseUrl = provider.base_url.replace(/\/+$/, '');
@@ -351,35 +357,17 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
         : { Authorization: `Bearer ${apiKey}` }),
     };
 
-    const body = provider.kind === 'anthropic-compatible' ? {
-      model: selectedModel,
-      messages: [{ role: 'user', content: automation.task_instruction }],
-      max_tokens: 2000,
-    } : {
-      model: selectedModel,
-      messages: [
-        { role: 'system', content: 'You are Gnito, a local-first AI assistant. Execute the task and respond concisely.' },
-        { role: 'user', content: automation.task_instruction },
-      ],
-      max_tokens: 2000,
+    const selectedPermissions = {
+      allowTerminal: !!automation.allow_terminal,
+      allowNetwork: !!automation.allow_network && !!automation.allow_terminal,
+      allowTools: !!automation.allow_tools,
     };
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
-    const json = await resp.json();
-    const summary = provider.kind === 'anthropic-compatible'
-      ? json?.content?.[0]?.text || ''
-      : json?.choices?.[0]?.message?.content || '';
+    const summary = await runAutomationAgent({ provider, apiKey, url, headers, model: selectedModel, taskInstruction: automation.task_instruction, chatId, permissions: selectedPermissions, signal: AbortSignal.timeout(120_000) });
     const assistantText = String(summary || 'The scheduled task completed without a text response.');
     db.prepare(`
       INSERT INTO messages (id, chat_id, role, content, provider_id, model_id, created_at)
       VALUES (?,?,?,?,?,?,?)
-    `).run(randomUUID(), chatId, 'assistant', assistantText, provider.id, body.model, Date.now());
+    `).run(randomUUID(), chatId, 'assistant', assistantText, provider.id, selectedModel, Date.now());
 
     db.prepare(`
       UPDATE automation_runs
@@ -398,6 +386,50 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
   }
 }
 
+async function runAutomationAgent(options: {
+  provider: any; apiKey: string; url: string; headers: Record<string, string>; model: string;
+  taskInstruction: string; chatId: string; permissions: { allowTerminal: boolean; allowNetwork: boolean; allowTools: boolean }; signal: AbortSignal;
+}): Promise<string> {
+  const { provider, url, headers, model, taskInstruction, chatId, permissions, signal } = options;
+  const baseSystem = `You are Gnito, a local-first AI assistant. Execute this scheduled task and respond concisely.\nAutomation permissions: terminal=${permissions.allowTerminal ? 'on' : 'off'}, network=${permissions.allowNetwork ? 'on' : 'off'}, tools=${permissions.allowTools ? 'on' : 'off'}. Never claim a tool ran unless its result confirms it.`;
+  if (provider.kind === 'anthropic-compatible' || !permissions.allowTools || !permissions.allowTerminal) {
+    const body = provider.kind === 'anthropic-compatible'
+      ? { model, messages: [{ role: 'user', content: `${baseSystem}\n\n${taskInstruction}` }], max_tokens: 2000 }
+      : { model, messages: [{ role: 'system', content: baseSystem }, { role: 'user', content: taskInstruction }], max_tokens: 2000 };
+    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
+    const json = await resp.json();
+    return String(provider.kind === 'anthropic-compatible' ? json?.content?.[0]?.text || '' : json?.choices?.[0]?.message?.content || '');
+  }
+
+  const messages: any[] = [{ role: 'system', content: baseSystem }, { role: 'user', content: taskInstruction }];
+  const terminalTool = {
+    type: 'function',
+    function: {
+      name: 'terminal_run',
+      description: 'Run a command in Gnito’s isolated Docker workspace. Network access is controlled by the automation settings.',
+      parameters: { type: 'object', properties: { command: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['command'] },
+    },
+  };
+  for (let round = 0; round < 6; round++) {
+    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ model, messages, max_tokens: 2000, tools: [terminalTool], tool_choice: 'auto' }), signal });
+    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
+    const json = await resp.json();
+    const message = json?.choices?.[0]?.message;
+    if (!message) throw new Error('Provider returned no scheduled-task response.');
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return String(message.content || '');
+    messages.push(message);
+    for (const call of message.tool_calls.slice(0, 4)) {
+      if (call.function?.name !== 'terminal_run') continue;
+      let input: any;
+      try { input = JSON.parse(call.function.arguments || '{}'); } catch { input = {}; }
+      const result = await executeAgentTerminal(input, { chatId, allowNetwork: permissions.allowNetwork, signal });
+      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 30_000) });
+    }
+  }
+  throw new Error('Scheduled task exceeded its six-step tool limit.');
+}
+
 // --------------------------------------------------------------- helpers
 
 function normalizeAutomation(r: any): any {
@@ -414,6 +446,9 @@ function normalizeAutomation(r: any): any {
     maxSteps: r.max_steps,
     maxRetries: r.max_retries,
     retryBackoffMs: r.retry_backoff_ms,
+    allowTerminal: !!r.allow_terminal,
+    allowNetwork: !!r.allow_network,
+    allowTools: !!r.allow_tools,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     nextRunAt: r.next_run_at ?? undefined,

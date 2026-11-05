@@ -26,11 +26,12 @@ export function registerChatRoutes(app: any): void {
     const status = req.query.status === 'archived' ? 'archived' : 'active';
     const projectId = req.query.projectId ? String(req.query.projectId) : null;
     const automationOnly = req.query.automation === '1';
-    let sql = `SELECT * FROM chats WHERE status = ?`;
+    let sql = `SELECT c.*, r.status AS automation_run_status, r.started_at AS automation_started_at, r.ended_at AS automation_ended_at
+      FROM chats c LEFT JOIN automation_runs r ON r.id = c.automation_run_id WHERE c.status = ?`;
     const params: any[] = [status];
-    if (projectId) { sql += ` AND project_id = ?`; params.push(projectId); }
-    sql += automationOnly ? ` AND automation_id IS NOT NULL` : ` AND automation_id IS NULL`;
-    sql += ` ORDER BY updated_at DESC LIMIT 500`;
+    if (projectId) { sql += ` AND c.project_id = ?`; params.push(projectId); }
+    sql += automationOnly ? ` AND c.automation_id IS NOT NULL` : ` AND c.automation_id IS NULL`;
+    sql += ` ORDER BY c.updated_at DESC LIMIT 500`;
     const rows = db.prepare(sql).all(...params) as any[];
     res.json(rows.map(r => ({
       id: r.id,
@@ -41,6 +42,10 @@ export function registerChatRoutes(app: any): void {
       updatedAt: r.updated_at,
       automationId: r.automation_id ?? null,
       automationRunId: r.automation_run_id ?? null,
+      automationRunStatus: r.automation_run_status ?? null,
+      automationStartedAt: r.automation_started_at ?? null,
+      automationEndedAt: r.automation_ended_at ?? null,
+      automationRuntimeMs: r.automation_started_at ? Math.max(0, (r.automation_ended_at ?? Date.now()) - r.automation_started_at) : null,
     })));
   });
 

@@ -3,7 +3,7 @@ import { Archive, FolderPlus, LoaderCircle, MessageSquare, Pencil, Plus, Search,
 import { Link } from 'wouter';
 import { api } from '../../lib/api';
 
-interface Chat { id: string; title: string; projectId: string | null; status: 'active' | 'archived'; updatedAt: number }
+interface Chat { id: string; title: string; projectId: string | null; status: 'active' | 'archived'; updatedAt: number; automationRunStatus?: string | null; automationRuntimeMs?: number | null }
 interface Project { id: string; name: string }
 
 interface Props {
@@ -12,6 +12,15 @@ interface Props {
   currentChatId?: string;
   onClose: () => void;
   onDeleted: (chatId: string) => void;
+}
+
+function formatRuntime(runtimeMs?: number | null): string {
+  if (runtimeMs == null) return 'running';
+  const seconds = Math.max(0, Math.round(runtimeMs / 1000));
+  if (seconds < 60) return `${seconds}s runtime`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s runtime`;
 }
 
 export function MyChatsDialog({ open, mode = 'all', currentChatId, onClose, onDeleted }: Props) {
@@ -149,7 +158,7 @@ export function MyChatsDialog({ open, mode = 'all', currentChatId, onClose, onDe
               <div className="my-chat-main">
                 <Link href={`/chats/${chat.id}`} className="my-chat-open" onClick={onClose} title={chat.title}>
                   <MessageSquare size={16} />
-                  <span><strong>{chat.title}</strong><small>{project ? `In ${project.name}` : 'No project'} · {new Date(chat.updatedAt).toLocaleDateString()}</small></span>
+                  <span><strong>{chat.title}</strong><small>{project ? `In ${project.name}` : 'No project'} · {new Date(chat.updatedAt).toLocaleDateString()}{mode === 'scheduled' && <> · {chat.automationRunStatus || 'pending'} · {formatRuntime(chat.automationRuntimeMs)}</>}</small></span>
                 </Link>
                 <div className="my-chat-actions">
                   <button className="btn btn-secondary btn-sm" onClick={() => { setEditingId(chat.id); setEditingTitle(chat.title); setError(''); }} disabled={busy} aria-label={`Rename ${chat.title}`} data-testid={`button-rename-${chat.id}`}><Pencil size={13} /> Rename</button>

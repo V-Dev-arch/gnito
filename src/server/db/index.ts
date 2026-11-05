@@ -182,6 +182,15 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_automations_provider ON automations(provider_id);
     `,
   },
+  {
+    version: 4,
+    name: 'automation tool permissions',
+    sql: `
+      ALTER TABLE automations ADD COLUMN allow_terminal INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE automations ADD COLUMN allow_network INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE automations ADD COLUMN allow_tools INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 function migrate(db: Db): void {

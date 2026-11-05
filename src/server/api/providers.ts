@@ -290,9 +290,10 @@ export function registerProviderRoutes(app: any): void {
 
       if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools) {
         const referenceImages = extractImageDataUrls(body.messages);
+        const imagePrompt = latestUserImagePrompt(body.messages);
         const text = row.kind === 'anthropic-compatible'
-          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
@@ -631,7 +632,7 @@ const GITHUB_TOOL = {
 const GITHUB_TOOL_POLICY = 'A GitHub plugin is connected. Use github_api for GitHub work instead of asking the user to paste tokens or using terminal credentials. GitHub itself enforces the PAT scopes and fine-grained repository permissions. Explain write or destructive actions before making them, and never claim success unless the tool result confirms it.';
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  provider: any; apiKey: string; referenceImages: string[];
+  provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
   chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; forceImageGeneration: boolean;
   send: AgentSend;
 }): Promise<string> {
@@ -668,7 +669,7 @@ async function runOpenAIAgent(options: {
       if (round === 0 && options.forceImageGeneration && options.allowImageTools) {
         options.send('activity', { message: 'The provider rejected tool chat; using the image tool directly…' });
         const prompt = providerText([...options.body.messages].reverse().find(message => message.role === 'user')?.content).trim();
-        const fallback = await createLocalImage({ prompt, quality: 'high' }, options.signal, options);
+        const fallback = await createLocalImage({ prompt: options.imagePrompt || prompt, quality: 'high' }, options.signal, options);
         if (fallback.output) {
           options.send('media', fallback.output);
           return fallback.output.markdown || '';
@@ -696,7 +697,7 @@ async function runOpenAIAgent(options: {
           if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
           imageCount++;
           options.send('activity', { message: 'Creating the image locally…' });
-          result = await createLocalImage(args, options.signal, options);
+          result = await createLocalImage({ ...args, prompt: options.imagePrompt || args.prompt }, options.signal, options);
           if (result.output) options.send('media', result.output);
           else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
         } else if (call.function?.name === 'github_api' && options.allowGitHubTools) {
@@ -778,13 +779,22 @@ function extractImageDataUrls(messages: { content: any }[]): string[] {
   return messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part?.type === 'image_url' && typeof part.image_url?.url === 'string').map(part => part.image_url.url) : []).slice(0, 4);
 }
 
+function latestUserImagePrompt(messages: { role: string; content: any }[]): string {
+  const latest = [...messages].reverse().find(message => message.role === 'user');
+  if (!latest) return '';
+  if (Array.isArray(latest.content)) {
+    return latest.content.filter(part => part?.type === 'text').map(part => String(part.text || '')).join(' ').trim().slice(0, 2_000);
+  }
+  return typeof latest.content === 'string' ? latest.content.trim().slice(0, 2_000) : '';
+}
+
 function escapeSvgText(value: string): string {
   return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character] || character));
 }
 
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  provider: any; apiKey: string; referenceImages: string[];
+  provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
   chatId: string; allowNetwork: boolean; allowImageTools: boolean; allowGitHubTools: boolean; send: AgentSend;
 }): Promise<string> {
   const system = [TERMINAL_TOOL_POLICY, ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []), ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
@@ -809,7 +819,7 @@ async function runAnthropicAgent(options: {
       let result: any;
       try {
         if (call.name === 'create_image' && options.allowImageTools) {
-          result = await createLocalImage(call.input, options.signal, options);
+          result = await createLocalImage({ ...call.input, prompt: options.imagePrompt || call.input?.prompt }, options.signal, options);
           if (result.output) options.send('media', result.output);
         } else if (call.name === 'github_api' && options.allowGitHubTools) {
           result = await executeGitHubTool(call.input, options.signal);
