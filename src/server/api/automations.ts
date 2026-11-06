@@ -11,6 +11,7 @@ import cron, { type ScheduledTask } from 'node-cron';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { redactSecrets, truncateForLog } from '../security/redact.js';
+import { executeAgentTerminal } from './tools.js';
 
 const db = getDb();
 
@@ -55,31 +56,43 @@ export function registerAutomationRoutes(app: any): void {
         kind: z.enum(['one-shot', 'recurring']).default('recurring'),
       }),
       taskInstruction: z.string().max(10000),
+      providerId: z.string().min(1),
+      modelId: z.string().min(1).max(200),
       missedRunPolicy: z.enum(['skip', 'run-once-on-startup', 'catch-up-within-window']).default('skip'),
       dryRun: z.boolean().default(false),
       maxSteps: z.number().int().positive().max(50).default(10),
       maxRetries: z.number().int().nonnegative().max(5).default(1),
       retryBackoffMs: z.number().int().nonnegative().max(60_000).default(30_000),
+      allowTerminal: z.boolean().default(false),
+      allowNetwork: z.boolean().default(false),
+      allowTools: z.boolean().default(false),
     }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation', issues: parsed.error.issues }); return; }
+    const provider = getSelectedProvider(parsed.data.providerId);
+    if (!provider) { res.status(400).json({ error: 'provider-unavailable', message: 'Select an enabled provider before creating the automation.' }); return; }
     const id = randomUUID();
     const now = Date.now();
     db.prepare(`
       INSERT INTO automations
-        (id, prompt, schedule, task_instruction, status, missed_run_policy, dry_run,
-         max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
+         max_steps, max_retries, retry_backoff_ms, allow_terminal, allow_network, allow_tools, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       id,
       parsed.data.prompt,
       JSON.stringify(parsed.data.schedule),
       parsed.data.taskInstruction,
+      provider.id,
+      parsed.data.modelId,
       'draft',
       parsed.data.missedRunPolicy,
       parsed.data.dryRun ? 1 : 0,
       parsed.data.maxSteps,
       parsed.data.maxRetries,
       parsed.data.retryBackoffMs,
+      parsed.data.allowTerminal ? 1 : 0,
+      parsed.data.allowNetwork && parsed.data.allowTerminal ? 1 : 0,
+      parsed.data.allowTools ? 1 : 0,
       now,
       now,
     );
@@ -90,6 +103,10 @@ export function registerAutomationRoutes(app: any): void {
   app.post('/api/automations/:id/activate', (req: Request, res: Response) => {
     const row = db.prepare('SELECT * FROM automations WHERE id = ?').get(req.params.id) as any;
     if (!row) { res.status(404).json({ error: 'not-found' }); return; }
+    if (!getSelectedProvider(row.provider_id) || !row.model_id) {
+      res.status(400).json({ error: 'provider-model-required', message: 'This automation must have an enabled provider and model selected before activation.' });
+      return;
+    }
     const schedule = JSON.parse(row.schedule);
     if (schedule.kind === 'recurring') {
       if (!cron.validate(schedule.expression)) {
@@ -119,11 +136,12 @@ export function registerAutomationRoutes(app: any): void {
     const now = Date.now();
     db.prepare(`
       INSERT INTO automations
-        (id, prompt, schedule, task_instruction, status, missed_run_policy, dry_run,
-         max_steps, max_retries, retry_backoff_ms, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(id, row.prompt, row.schedule, row.task_instruction, 'draft',
-      row.missed_run_policy, row.dry_run, row.max_steps, row.max_retries, row.retry_backoff_ms, now, now);
+        (id, prompt, schedule, task_instruction, provider_id, model_id, status, missed_run_policy, dry_run,
+         max_steps, max_retries, retry_backoff_ms, allow_terminal, allow_network, allow_tools, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(id, row.prompt, row.schedule, row.task_instruction, row.provider_id, row.model_id, 'draft',
+      row.missed_run_policy, row.dry_run, row.max_steps, row.max_retries, row.retry_backoff_ms,
+      row.allow_terminal, row.allow_network, row.allow_tools, now, now);
     res.status(201).json({ id });
   });
 
@@ -307,53 +325,46 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
   const automation = db.prepare('SELECT * FROM automations WHERE id = ?').get(automationId) as any;
   if (!automation) return;
 
-  try {
-    // Use the user's saved default model (or first enabled provider).
-    const defaultModelRow = db.prepare("SELECT value FROM settings WHERE key = 'composer.defaultModel'").get() as any;
-    const defaultModel = defaultModelRow?.value || '';
-    const provider = db.prepare('SELECT * FROM providers WHERE enabled = 1 LIMIT 1').get() as any;
-    if (!provider) throw new Error('No enabled provider configured.');
+  const chatId = randomUUID();
+  const now = Date.now();
+  const title = `Scheduled: ${String(automation.prompt || automation.task_instruction).replace(/\s+/g, ' ').trim().slice(0, 280) || 'Automation run'}`;
+  db.prepare(`
+    INSERT INTO chats (id, project_id, title, status, created_at, updated_at, automation_id, automation_run_id)
+    VALUES (?,?,?,?,?,?,?,?)
+  `).run(chatId, null, title, 'active', now, now, automationId, runId);
+  db.prepare(`
+    INSERT INTO messages (id, chat_id, role, content, created_at)
+    VALUES (?,?,?,?,?)
+  `).run(randomUUID(), chatId, 'user', automation.task_instruction, now);
 
-    // Note: this is a synchronous, single-shot call (no agent loop yet).
-    // Full agent-loop implementation is tracked in docs/implementation-status.md.
+  try {
+    // Use only the provider and model explicitly saved on this automation.
+    const provider = getSelectedProvider(automation.provider_id);
+    const selectedModel = String(automation.model_id || '').trim();
+    if (!provider || !selectedModel) throw new Error('This automation has no enabled provider and model configured. Edit it in Automation Center before running it.');
+
     const { getProviderSecret } = await import('../security/vault.js');
     const apiKey = getProviderSecret(provider.id) || '';
-    const baseUrl = provider.base_url.replace(/\/+$/, '');
-    const url = provider.kind === 'anthropic-compatible'
-      ? `${baseUrl}/v1/messages`
-      : `${baseUrl}/chat/completions`;
-
+    const url = buildAutomationChatUrl(provider);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...(provider.kind === 'anthropic-compatible'
         ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-        : { Authorization: `Bearer ${apiKey}` }),
+        : (apiKey ? { Authorization: `Bearer ${apiKey}` } : {})),
+      ...parseCustomHeaders(provider.custom_headers),
     };
 
-    const body = provider.kind === 'anthropic-compatible' ? {
-      model: defaultModel || 'claude-3-haiku-20240307',
-      messages: [{ role: 'user', content: automation.task_instruction }],
-      max_tokens: 2000,
-    } : {
-      model: defaultModel || 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: 'You are Gnito, a local-first AI assistant. Execute the task and respond concisely.' },
-        { role: 'user', content: automation.task_instruction },
-      ],
-      max_tokens: 2000,
+    const selectedPermissions = {
+      allowTerminal: !!automation.allow_terminal,
+      allowNetwork: !!automation.allow_network && !!automation.allow_terminal,
+      allowTools: !!automation.allow_tools,
     };
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!resp.ok) throw new Error(`Provider returned HTTP ${resp.status}.`);
-    const json = await resp.json();
-    const summary = provider.kind === 'anthropic-compatible'
-      ? json?.content?.[0]?.text || ''
-      : json?.choices?.[0]?.message?.content || '';
+    const summary = await runAutomationAgent({ provider, apiKey, url, headers, model: selectedModel, taskInstruction: automation.task_instruction, chatId, permissions: selectedPermissions, maxSteps: Math.max(1, Math.min(Number(automation.max_steps) || 10, 10)), signal: AbortSignal.timeout(120_000) });
+    const assistantText = String(summary || 'The scheduled task completed without a text response.');
+    db.prepare(`
+      INSERT INTO messages (id, chat_id, role, content, provider_id, model_id, created_at)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(randomUUID(), chatId, 'assistant', assistantText, provider.id, selectedModel, Date.now());
 
     db.prepare(`
       UPDATE automation_runs
@@ -361,12 +372,105 @@ async function executeAutomation(automationId: string, runId: string): Promise<v
       WHERE id=?
     `).run(Date.now(), truncateForLog(summary, 10_000), runId);
   } catch (e: any) {
+    const errorText = `Scheduled task failed: ${redactSecrets(truncateForLog(e?.message || 'Execution failed', 2_000))}`;
+    db.prepare(`INSERT INTO messages (id, chat_id, role, content, created_at) VALUES (?,?,?,?,?)`)
+      .run(randomUUID(), chatId, 'assistant', errorText, Date.now());
     db.prepare(`
       UPDATE automation_runs
-      SET status='failed', ended_at=?, error=?, steps_used=1
+      SET status='failed', ended_at=?, error=?, result_summary=?, steps_used=1
       WHERE id=?
-    `).run(Date.now(), truncateForLog(redactSecrets(e?.message || 'Execution failed'), 2000), runId);
+    `).run(Date.now(), truncateForLog(redactSecrets(e?.message || 'Execution failed'), 2000), errorText, runId);
   }
+}
+
+async function runAutomationAgent(options: {
+  provider: any; apiKey: string; url: string; headers: Record<string, string>; model: string;
+  taskInstruction: string; chatId: string; permissions: { allowTerminal: boolean; allowNetwork: boolean; allowTools: boolean }; maxSteps: number; signal: AbortSignal;
+}): Promise<string> {
+  const { provider, url, headers, model, taskInstruction, chatId, permissions, maxSteps, signal } = options;
+  const baseSystem = `You are Gnito, a local-first AI assistant. Execute this scheduled task and respond concisely.\nAutomation permissions: terminal=${permissions.allowTerminal ? 'on' : 'off'}, network=${permissions.allowNetwork ? 'on' : 'off'}, tools=${permissions.allowTools ? 'on' : 'off'}. Never claim a tool ran unless its result confirms it.`;
+  if (provider.kind === 'anthropic-compatible' || !permissions.allowTools || !permissions.allowTerminal) {
+    const body = provider.kind === 'anthropic-compatible'
+      ? { model, messages: [{ role: 'user', content: `${baseSystem}\n\n${taskInstruction}` }], max_tokens: 2000 }
+      : { model, messages: [{ role: 'system', content: baseSystem }, { role: 'user', content: taskInstruction }], max_tokens: 2000 };
+    const json = await requestAutomationJson(url, headers, body, signal);
+    return String(provider.kind === 'anthropic-compatible' ? json?.content?.[0]?.text || '' : json?.choices?.[0]?.message?.content || '');
+  }
+
+  const messages: any[] = [{ role: 'system', content: baseSystem }, { role: 'user', content: taskInstruction }];
+  const terminalTool = {
+    type: 'function',
+    function: {
+      name: 'terminal_run',
+      description: 'Run a command in Gnito’s isolated Docker workspace. Network access is controlled by the automation settings.',
+      parameters: { type: 'object', properties: { command: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['command'] },
+    },
+  };
+  for (let round = 0; round < maxSteps; round++) {
+    const json = await requestAutomationJson(url, headers, { model, messages, max_tokens: 2000, tools: [terminalTool], tool_choice: 'auto' }, signal, {
+      fallbackMessages: [{ role: 'system', content: `${baseSystem}\nThe provider could not accept the tool-enabled request. Do not use tools; complete the task with the information already available.` }, { role: 'user', content: taskInstruction }],
+    });
+    const message = json?.choices?.[0]?.message;
+    if (!message) throw new Error('Provider returned no scheduled-task response.');
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return String(message.content || '');
+    messages.push(message);
+    for (const call of message.tool_calls.slice(0, 4)) {
+      if (call.function?.name !== 'terminal_run') continue;
+      let input: any;
+      try { input = JSON.parse(call.function.arguments || '{}'); } catch { input = {}; }
+      const result = await executeAgentTerminal(input, { chatId, allowNetwork: permissions.allowNetwork, signal });
+      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 30_000) });
+    }
+  }
+  // Some models keep requesting the same tool after a successful result. Ask once
+  // without tools rather than turning a completed run into a hard failure.
+  const finalJson = await requestAutomationJson(url, headers, {
+    model, messages: [{ role: 'system', content: `${baseSystem}\nThe tool budget is exhausted. Do not call tools. Return a concise final answer based on the completed results.` }, { role: 'user', content: taskInstruction }, ...messages.filter(message => message.role === 'tool').slice(-maxSteps)], max_tokens: 2000,
+  }, signal);
+  return String(finalJson?.choices?.[0]?.message?.content || 'The scheduled task completed after reaching its tool budget.');
+}
+
+async function requestAutomationJson(url: string, headers: Record<string, string>, body: any, signal: AbortSignal, options?: { fallbackMessages?: any[] }): Promise<any> {
+  const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    if (response.ok) {
+      const json = await response.json().catch(() => null);
+      if (!json) throw new Error('Provider returned an invalid JSON response.');
+      return json;
+    }
+    lastStatus = response.status;
+    void response.body?.cancel().catch(() => {});
+    if (!transientStatuses.has(response.status) || attempt === 2) break;
+    await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  if (options?.fallbackMessages && [400, 404, 415, 422, 429, 500, 502, 503, 504].includes(lastStatus)) {
+    const fallbackBody = { model: body.model, messages: options.fallbackMessages, max_tokens: body.max_tokens };
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(fallbackBody), signal });
+    if (response.ok) return response.json();
+  }
+  throw new Error(`Provider returned HTTP ${lastStatus}.`);
+}
+
+function buildAutomationChatUrl(provider: any): string {
+  let base = String(provider.base_url || '').replace(/\/+$/, '');
+  base = base.replace(/\/(?:chat\/completions|responses|images\/generations|messages|models)$/i, '');
+  try {
+    const parsed = new URL(base);
+    if (provider.kind !== 'anthropic-compatible' && parsed.hostname.toLowerCase() === 'api.openai.com' && parsed.pathname === '') base += '/v1';
+  } catch { /* Provider validation handles malformed URLs. */ }
+  const endpoint = provider.kind === 'anthropic-compatible' ? '/v1/messages' : '/chat/completions';
+  const path = endpoint.startsWith('/v1/') && /\/v1$/i.test(base) ? endpoint.slice(3) : endpoint;
+  return `${base}${path}`;
+}
+
+function parseCustomHeaders(value: unknown): Record<string, string> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.fromEntries(Object.entries(parsed).filter(([, item]) => typeof item === 'string')) as Record<string, string> : {};
+  } catch { return {}; }
 }
 
 // --------------------------------------------------------------- helpers
@@ -377,16 +481,26 @@ function normalizeAutomation(r: any): any {
     prompt: r.prompt,
     schedule: JSON.parse(r.schedule),
     taskInstruction: r.task_instruction,
+    providerId: r.provider_id ?? undefined,
+    modelId: r.model_id ?? undefined,
     status: r.status,
     missedRunPolicy: r.missed_run_policy,
     dryRun: !!r.dry_run,
     maxSteps: r.max_steps,
     maxRetries: r.max_retries,
     retryBackoffMs: r.retry_backoff_ms,
+    allowTerminal: !!r.allow_terminal,
+    allowNetwork: !!r.allow_network,
+    allowTools: !!r.allow_tools,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     nextRunAt: r.next_run_at ?? undefined,
   };
+}
+
+function getSelectedProvider(providerId: string | null | undefined): any | null {
+  if (!providerId) return null;
+  return db.prepare('SELECT * FROM providers WHERE id = ? AND enabled = 1').get(providerId) as any || null;
 }
 
 function normalizeRun(r: any): any {

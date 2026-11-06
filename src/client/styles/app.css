@@ -334,6 +334,12 @@
 
 /* ---------- Plugins ---------- */
 .plugin-card { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.github-plugin-card { min-width: 0; padding: var(--space-3); }
+.github-plugin-mark { flex: 0 0 32px; width: 32px; height: 32px; display: grid; place-items: center; color: var(--color-text); }
+.github-plugin-main { min-width: 0; flex: 1 1 auto; }
+.github-plugin-actions { flex: 0 0 auto; }
+.github-plugin-connect-row { margin-top: 10px; align-items: center; }
+.github-plugin-connect-row .btn { white-space: nowrap; }
 .plugin-name { font-weight: 600; font-size: var(--text-sm); }
 .plugin-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
 .plugin-permissions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: var(--space-2); }
@@ -485,6 +491,11 @@
   .app-shell .sidebar.sidebar-open { transform: translateX(0); }
   .settings-layout { grid-template-columns: 1fr; gap: var(--space-4); }
   .field-row { flex-direction: column; }
+  .github-plugin-card { gap: var(--space-2); }
+  .github-plugin-connect-row { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+  .github-plugin-connect-row .field { width: 100%; min-width: 0; }
+  .github-plugin-connect-row .btn, .github-plugin-actions .btn { width: 100%; justify-content: center; }
+  .github-plugin-actions { width: 100%; }
   .chat-container { padding: var(--space-4) var(--space-3) calc(var(--space-16) + 90px); }
   .composer { padding: var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom)); }
   .composer-input-row { flex-wrap: wrap; }

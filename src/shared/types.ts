@@ -170,6 +170,9 @@ export const AutomationSchema = z.object({
   schedule: AutomationScheduleSchema,
   /** What the model will be asked to do, derived from prompt + clarifications. */
   taskInstruction: z.string().max(10000),
+  /** Provider and model used exclusively by this automation. */
+  providerId: z.string().min(1).optional(),
+  modelId: z.string().min(1).max(200).optional(),
   status: AutomationStatusSchema.default('draft'),
   /** Missed-run policy when the service was down. */
   missedRunPolicy: MissedRunPolicySchema.default('skip'),
@@ -182,6 +185,9 @@ export const AutomationSchema = z.object({
   /** Retry policy. */
   maxRetries: z.number().int().nonnegative().max(5).default(1),
   retryBackoffMs: z.number().int().nonnegative().max(60_000).default(30_000),
+  allowTerminal: z.boolean().default(false),
+  allowNetwork: z.boolean().default(false),
+  allowTools: z.boolean().default(false),
   /** Concurrency: at most one run per automation at a time. */
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),

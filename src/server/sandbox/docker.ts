@@ -7,10 +7,10 @@ import { DATA_DIR } from '../config.js';
 
 const execFileAsync = promisify(execFile);
 const DOCKER_BIN = process.env.GNITO_DOCKER_BIN || (process.platform === 'win32' ? 'docker.exe' : 'docker');
-export const SANDBOX_IMAGE = process.env.GNITO_SANDBOX_IMAGE || 'gnito-sandbox:3.24.2';
+export const SANDBOX_IMAGE = process.env.GNITO_SANDBOX_IMAGE || 'gnito-sandbox:3.24.3';
 export const SANDBOX_WORKSPACE = path.join(DATA_DIR, 'sandbox-workspace');
-export const MAX_WORKSPACE_BYTES = 256 * 1024 * 1024;
-const DISK_FREE_RESERVE_BYTES = 128 * 1024 * 1024;
+export const MAX_WORKSPACE_BYTES = 1024 * 1024 * 1024;
+const DISK_FREE_RESERVE_BYTES = 512 * 1024 * 1024;
 const MAX_OUTPUT_CHARS = 32_000;
 const MAX_TIMEOUT_MS = 300_000;
 const WORKSPACE_SCAN_INTERVAL_MS = 250;
@@ -90,7 +90,7 @@ export function buildDockerRunArgs(options: {
     '--label', 'com.gnito.terminal-sandbox=true',
     `--network=${options.networkAccess ? 'bridge' : 'none'}`, '--read-only', '--cap-drop=ALL',
     '--security-opt=no-new-privileges:true', '--pids-limit=64',
-    '--memory=512m', '--cpus=1', '--ulimit', 'nofile=256:256', '--ulimit', 'fsize=134217728:134217728',
+    '--memory=512m', '--cpus=1', '--ulimit', 'nofile=256:256', '--ulimit', 'fsize=1073741824:1073741824',
     '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777',
     '--user', `${options.uid}:${options.gid}`,
     '--env', 'HOME=/workspace/.home',
@@ -193,7 +193,7 @@ function cancelledError(cleanupVerified: boolean, reason: 'timeout' | 'cancelled
     ? ''
     : ' Container cleanup could not be verified; inspect Docker containers labeled com.gnito.terminal-sandbox=true before retrying.';
   if (reason === 'timeout') return `Terminal command timed out. The container was stopped.${suffix}`;
-  if (reason === 'quota') return `Terminal workspace limit exceeded; the container was stopped. The workspace is limited to 256 MiB and the host must keep 128 MiB free.${suffix}`;
+  if (reason === 'quota') return `Terminal workspace limit exceeded; the container was stopped. The workspace is limited to 1 GiB and the host must keep 512 MiB free.${suffix}`;
   return `Terminal command cancelled.${suffix}`;
 }
 
@@ -217,10 +217,10 @@ export async function runSandboxCommand(command: string, timeoutMs: number, sign
   try {
     workspace = ensureWorkspace();
     const currentUsage = measureWorkspaceBytes(workspace);
-    if (currentUsage > MAX_WORKSPACE_BYTES) return { error: 'Terminal workspace already exceeds its 256 MiB size limit. Remove files from ~/.gnito/sandbox-workspace before running another command.' };
+    if (currentUsage > MAX_WORKSPACE_BYTES) return { error: 'Terminal workspace already exceeds its 1 GiB size limit. Remove files from ~/.gnito/sandbox-workspace before running another command.' };
     const available = freeBytes(workspace);
     workspaceLimit = Math.min(MAX_WORKSPACE_BYTES, currentUsage + Math.max(0, available - DISK_FREE_RESERVE_BYTES));
-    if (workspaceLimit <= currentUsage) return { error: 'Not enough free disk space to safely run a terminal command; Gnito preserves at least 128 MiB for the host.' };
+    if (workspaceLimit <= currentUsage) return { error: 'Not enough free disk space to safely run a terminal command; Gnito preserves at least 512 MiB for the host.' };
   } catch {
     return { error: 'Terminal sandbox workspace or its disk quota could not be checked safely.' };
   }
@@ -305,10 +305,53 @@ export async function runSandboxCommand(command: string, timeoutMs: number, sign
         return;
       }
       if (measureWorkspaceBytes(workspace) > workspaceLimit) {
-        finish({ error: 'Terminal workspace exceeded its 256 MiB storage limit. Remove files from ~/.gnito/sandbox-workspace before running another command.' });
+        finish({ error: 'Terminal workspace exceeded its 1 GiB storage limit. Remove files from ~/.gnito/sandbox-workspace before running another command.' });
         return;
       }
       finish({ output: { exitCode: code ?? 1, stdout, stderr } });
     });
   });
+}
+
+const SANDBOX_MEDIA_TYPES: Record<string, string> = {
+  '.avif': 'image/avif', '.gif': 'image/gif', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg',
+  '.png': 'image/png', '.webp': 'image/webp', '.m4v': 'video/x-m4v', '.mov': 'video/quicktime',
+  '.mp4': 'video/mp4', '.ogv': 'video/ogg', '.webm': 'video/webm',
+};
+
+/** Open only regular image/video files beneath the workspace, pinning every directory component without following symlinks. */
+export function openSandboxMediaFile(workspacePath: string): { fd: number; path: string; filename: string; contentType: string; size: number } | null {
+  if (workspacePath.length > 2_000 || !workspacePath.startsWith('/workspace/')) return null;
+  const relative = workspacePath.slice('/workspace/'.length);
+  const parts = relative.split('/');
+  if (!relative || parts.some(part => !part || part === '.' || part === '..' || part.includes('\\') || part.includes('\0'))) return null;
+  const filename = parts[parts.length - 1];
+  const contentType = SANDBOX_MEDIA_TYPES[path.extname(filename).toLowerCase()];
+  if (!contentType) return null;
+  if (!fs.constants.O_DIRECTORY || !fs.constants.O_NOFOLLOW) return null;
+  const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd'
+    : process.platform === 'darwin' ? '/dev/fd' : '';
+  if (!descriptorRoot || !fs.existsSync(descriptorRoot)) return null;
+  let directoryFd: number | undefined;
+  let fileFd: number | undefined;
+  try {
+    const root = fs.realpathSync(ensureWorkspace());
+    const directoryFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+    directoryFd = fs.openSync(root, directoryFlags);
+    for (const part of parts.slice(0, -1)) {
+      const childFd = fs.openSync(`${descriptorRoot}/${directoryFd}/${part}`, directoryFlags);
+      fs.closeSync(directoryFd);
+      directoryFd = childFd;
+    }
+    fileFd = fs.openSync(`${descriptorRoot}/${directoryFd}/${filename}`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK || 0));
+    const stats = fs.fstatSync(fileFd);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_WORKSPACE_BYTES) return null;
+    const result = { fd: fileFd, path: workspacePath, filename, contentType, size: stats.size };
+    fileFd = undefined;
+    return result;
+  } catch { return null; }
+  finally {
+    if (fileFd !== undefined) { try { fs.closeSync(fileFd); } catch {} }
+    if (directoryFd !== undefined) { try { fs.closeSync(directoryFd); } catch {} }
+  }
 }

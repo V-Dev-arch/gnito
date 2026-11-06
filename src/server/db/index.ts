@@ -164,6 +164,33 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
     `,
   },
+  {
+    version: 2,
+    name: 'automation chat metadata',
+    sql: `
+      ALTER TABLE chats ADD COLUMN automation_id TEXT REFERENCES automations(id) ON DELETE SET NULL;
+      ALTER TABLE chats ADD COLUMN automation_run_id TEXT REFERENCES automation_runs(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_chats_automation ON chats(automation_id, updated_at DESC);
+    `,
+  },
+  {
+    version: 3,
+    name: 'automation provider and model selection',
+    sql: `
+      ALTER TABLE automations ADD COLUMN provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL;
+      ALTER TABLE automations ADD COLUMN model_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_automations_provider ON automations(provider_id);
+    `,
+  },
+  {
+    version: 4,
+    name: 'automation tool permissions',
+    sql: `
+      ALTER TABLE automations ADD COLUMN allow_terminal INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE automations ADD COLUMN allow_network INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE automations ADD COLUMN allow_tools INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 function migrate(db: Db): void {

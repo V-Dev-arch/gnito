@@ -19,7 +19,9 @@ import { z } from 'zod';
 import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
-import { executeAgentTerminal } from './tools.js';
+import { executeAgentTerminal, executeGitHubTool } from './tools.js';
+import { executeMemoryRead, executeMemoryWrite } from './memory.js';
+import { storeGeneratedPng, storeGeneratedSvg } from './media.js';
 
 const db = getDb();
 const MANUS_API_ROOT = 'https://api.manus.ai';
@@ -189,13 +191,22 @@ export function registerProviderRoutes(app: any): void {
       model: z.string().min(1).max(200),
       messages: z.array(z.object({
         role: z.enum(['system', 'user', 'assistant', 'tool']),
-        content: z.string().max(200_000),
+        content: z.union([
+          z.string().max(200_000),
+          z.array(z.union([
+            z.object({ type: z.literal('text'), text: z.string().max(200_000) }),
+            z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string().max(7_000_000) }) }),
+          ])).max(20),
+        ]),
       })).min(1).max(200),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().positive().max(128_000).optional(),
       stream: z.boolean().default(true),
       allowTerminal: z.boolean().default(false),
       allowNetwork: z.boolean().default(false),
+      allowImageTools: z.boolean().default(false),
+      allowGitHubTools: z.boolean().default(false),
+      allowMemory: z.boolean().default(false),
       chatId: z.string().min(1).max(200).optional(),
     });
     const parsed = ChatRequest.safeParse(req.body);
@@ -204,8 +215,21 @@ export function registerProviderRoutes(app: any): void {
       return;
     }
     const body = parsed.data;
+    const imageParts = body.messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part.type === 'image_url') : []);
+    if (imageParts.some(part => !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(part.image_url.url))) {
+      res.status(400).json({ error: 'validation', message: 'Image attachments must be local PNG, JPEG, WebP or GIF files within the attachment size limit.' });
+      return;
+    }
+    if (row.kind === 'manus-agent' && imageParts.length) {
+      res.status(400).json({ error: 'unsupported-attachments', message: 'This provider path does not forward image attachments. Choose an OpenAI- or Anthropic-compatible vision model.' });
+      return;
+    }
     if (body.allowNetwork && !body.allowTerminal) {
       res.status(400).json({ error: 'validation', message: 'Enable terminal access before granting terminal network access.' });
+      return;
+    }
+    if (body.allowMemory && req.header('x-gnito-incognito') === '1') {
+      res.status(403).json({ error: 'incognito', message: 'Memory tools are disabled in Incognito Mode.' });
       return;
     }
     if (body.allowTerminal && row.kind === 'manus-agent') {
@@ -247,7 +271,7 @@ export function registerProviderRoutes(app: any): void {
         const result = await runManusTask({
           apiKey,
           profile: body.model,
-          messages: body.messages,
+          messages: body.messages.map(message => ({ role: message.role, content: providerText(message.content) })),
           signal: abortController.signal,
           onTaskCreated: taskId => { manusTaskId = taskId; send('activity', { message: `Manus task created · ${taskId}` }); },
           onStatus: status => send('activity', { message: `Manus status · ${status}` }),
@@ -270,43 +294,45 @@ export function registerProviderRoutes(app: any): void {
         ...JSON.parse(row.custom_headers || '{}'),
       };
 
-      if (body.allowTerminal) {
+      if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools || body.allowMemory) {
+        const referenceImages = extractImageDataUrls(body.messages);
+        const imagePrompt = latestUserImagePrompt(body.messages);
         const text = row.kind === 'anthropic-compatible'
-          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, chatId: body.chatId!, allowNetwork: body.allowNetwork, send });
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, allowMemory: body.allowMemory, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, allowMemory: body.allowMemory, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
         return;
       }
 
+      const anthropicSystemPrompt = providerText(body.messages.find(message => message.role === 'system')?.content);
+      const providerRequestBody = row.kind === 'anthropic-compatible'
+        ? {
+            model: body.model,
+            messages: body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) })),
+            ...(anthropicSystemPrompt ? { system: anthropicSystemPrompt } : {}),
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens ?? 4096,
+          }
+        : {
+            model: body.model,
+            messages: body.messages,
+            stream: body.stream,
+            temperature: body.temperature,
+            max_tokens: body.maxTokens,
+          };
       const resp = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(
-          row.kind === 'anthropic-compatible'
-            ? {
-                model: body.model,
-                messages: body.messages.filter(m => m.role !== 'system'),
-                system: body.messages.find(m => m.role === 'system')?.content,
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-            : {
-                model: body.model,
-                messages: body.messages,
-                stream: body.stream,
-                temperature: body.temperature,
-                max_tokens: body.maxTokens,
-              }
-        ),
+        body: JSON.stringify(providerRequestBody),
         signal: abortController.signal,
       });
 
       if (!resp.ok) {
         void resp.body?.cancel().catch(() => {});
-        send('error', { message: safeProviderStatusError(resp.status, 'Chat request') });
+        send('error', { message: safeProviderStatusError(resp.status, imageParts.length ? 'Vision chat request' : 'Chat request') });
         send('end', {});
         res.end();
         return;
@@ -365,13 +391,20 @@ function buildChatUrl(row: any): string {
   const suffix = row.kind === 'anthropic-compatible' ? '/v1/messages' : '/chat/completions';
   return appendEndpoint(row.base_url, suffix);
 }
-
 function appendEndpoint(baseUrl: string, endpoint: string): string {
-  const base = String(baseUrl || '').replace(/\/+$/, '');
+  const base = normalizeOpenAIBaseUrl(baseUrl);
   const path = endpoint.startsWith('/v1/') && /\/v1$/i.test(base) ? endpoint.slice(3) : endpoint;
   return `${base}${path}`;
 }
-
+function normalizeOpenAIBaseUrl(baseUrl: string): string {
+  let base = String(baseUrl || '').replace(/\/+$/, '');
+  base = base.replace(/\/(?:chat\/completions|responses|images\/generations|models)$/i, '');
+  try {
+    const url = new URL(base);
+    if (url.hostname.toLowerCase() === 'api.openai.com' && url.pathname === '') base = `${base}/v1`;
+  } catch { /* Provider URL validation reports malformed URLs before this point. */ }
+  return base;
+}
 function extractAssistantText(json: any, kind: string): string {
   if (kind === 'anthropic-compatible') {
     return json?.content?.filter((c: any) => c?.type === 'text').map((c: any) => c?.text).join('') || '';
@@ -506,7 +539,7 @@ async function stopManusTask(apiKey: string, taskId: string): Promise<void> {
   } catch { /* the user has already stopped the Gnito stream; do not leak secrets or block */ }
 }
 
-type AgentChatBody = { model: string; messages: { role: string; content: string }[]; temperature?: number; maxTokens?: number };
+type AgentChatBody = { model: string; messages: { role: string; content: any }[]; temperature?: number; maxTokens?: number };
 type AgentSend = (event: string, data: unknown) => void;
 
 const TERMINAL_TOOL = {
@@ -516,13 +549,8 @@ const TERMINAL_TOOL = {
     description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
     parameters: {
       type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to run in /workspace.' },
-        timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-        networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
-      },
+      properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
       required: ['command'],
-      additionalProperties: false,
     },
   },
 };
@@ -532,47 +560,184 @@ const ANTHROPIC_TERMINAL_TOOL = {
   description: 'Run a command in the user-approved Gnito Docker workspace. Never use for destructive actions without first explaining them. Network is only available if the user explicitly enabled it for this message.',
   input_schema: {
     type: 'object',
-    properties: {
-      command: { type: 'string', description: 'Shell command to run in /workspace.' },
-      timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-      networkAccess: { type: 'boolean', default: false, description: 'Set true only when internet access was explicitly enabled by the user.' },
-    },
+    properties: { command: { type: 'string', description: 'Shell command to run in /workspace.' } },
     required: ['command'],
   },
 };
 
-const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it only when a command materially helps with the request. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask the user before destructive or irreversible operations. Never claim a command ran unless the tool result confirms it. Network access is available only if the user enabled it and the tool call sets networkAccess=true.';
+const MEMORY_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_read',
+    description: 'Read the user-approved local memory when relevant. Never expose unrelated private memory.',
+    parameters: { type: 'object', properties: {} },
+  },
+};
+const MEMORY_WRITE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_write',
+    description: 'Save a durable user preference, fact, goal, or instruction when the user asks you to remember it or it is clearly useful for future conversations. Use a concise stable key and explain what was saved.',
+    parameters: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' }, reason: { type: 'string' } }, required: ['key', 'value'] },
+  },
+};
+const MEMORY_TOOL_POLICY = 'Local memory tools are available. Read memory only when relevant. Write memory when the user explicitly asks you to remember something, or when a durable preference/fact is clearly useful for future conversations. Never save passwords, API keys, highly sensitive data, or transient details. Confirm saved memory in your response.';
 
+const ANTHROPIC_MEMORY_READ_TOOL = { name: 'memory_read', description: 'Read user-approved local memory when relevant.', input_schema: { type: 'object', properties: {} } };
+const ANTHROPIC_MEMORY_WRITE_TOOL = { name: 'memory_write', description: 'Save a durable preference, fact, goal, or instruction when appropriate. Never save secrets.', input_schema: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' }, reason: { type: 'string' } }, required: ['key', 'value'] } };
+
+const ANTHROPIC_GITHUB_TOOL = {
+  name: 'github_api',
+  description: 'Use the connected GitHub PAT through the GitHub REST API. GitHub enforces the token scopes and fine-grained repository permissions; never expose the token.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+      path: { type: 'string', description: 'Relative GitHub API path beginning with /.' },
+      body: { type: 'object', description: 'JSON request body for POST, PUT, or PATCH.' },
+    },
+    required: ['path'],
+  },
+};
+
+const ANTHROPIC_IMAGE_TOOL = {
+  name: 'create_image',
+  description: 'Create one polished, high-fidelity image. Prefer a realistic raster image through the configured image provider; include svg only as a fallback for providers without image generation. Match any attached reference image in composition, lighting, color palette, and subject identity without copying unwanted content.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: 'Detailed visual description.' },
+      style: { type: 'string', description: 'Visual direction such as photorealistic, cinematic, editorial, or 3D render.' },
+      quality: { type: 'string', enum: ['standard', 'high'], description: 'Requested rendering quality.' },
+      aspect_ratio: { type: 'string', enum: ['1:1', '4:3', '3:2', '16:9', '9:16'], description: 'Target composition ratio.' },
+      negative_prompt: { type: 'string', description: 'Unwanted artifacts or elements.' },
+      svg: { type: 'string', description: 'Optional self-contained SVG fallback.' },
+    },
+    required: ['prompt'],
+  },
+};
+
+const TERMINAL_TOOL_POLICY = 'A local Docker terminal tool is available for this message because the user explicitly enabled it. Use it when commands materially help. Commands run in a dedicated container with only Gnito’s persistent workspace mounted; no host home, Docker socket, or server environment variables are mounted. Ask before destructive or irreversible operations. Never claim a command ran unless its tool result confirms it. The Network toggle is authoritative and Gnito applies it to every command; do not try to change or bypass it. For public GitHub repositories, prefer `git clone https://github.com/OWNER/REPO.git` rather than `gh repo clone`, which may require a CLI login. When cloning or downloading, set `timeoutMs` to at least 180000. If Network is off, explain that it must be enabled before cloning. If a network-enabled clone fails, test `curl -I https://github.com` and `git ls-remote https://github.com/OWNER/REPO.git` and report the exact observed error; do not claim the repo cloned unless the command confirms it. When creating images/videos in /workspace, return a Markdown link to /api/terminal/media?path=<URL-encoded absolute /workspace path> for safe preview and download.';
+
+const IMAGE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_image',
+    description: 'Create one polished high-fidelity image. Use the configured provider image endpoint for a realistic raster image when available; attached images are reference images for style, composition, lighting, and subject—not to be ignored. Use a self-contained SVG only when raster generation is unavailable. Never return a generic placeholder cityscape.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Detailed visual description of the requested image.' },
+        style: { type: 'string', description: 'Visual direction, preferably including photorealistic/cinematic details.' },
+        quality: { type: 'string', enum: ['standard', 'high'], description: 'Requested rendering quality.' },
+        aspect_ratio: { type: 'string', enum: ['1:1', '4:3', '3:2', '16:9', '9:16'], description: 'Target composition ratio.' },
+        negative_prompt: { type: 'string', description: 'Unwanted artifacts or elements.' },
+        svg: { type: 'string', description: 'Optional self-contained SVG fallback.' },
+      },
+      required: ['prompt'],
+    },
+  },
+};
+
+const IMAGE_TOOL_POLICY = 'An advanced image-creation tool is available because the user explicitly enabled Image tools. Prefer a high-fidelity raster result from the configured provider image endpoint. Treat attached images as references: preserve the requested subject and borrow only the requested style, composition, lighting, lens, and palette. Include a detailed prompt, style, quality, aspect ratio, and negative prompt. Use SVG only as a provider-compatibility fallback, never as the primary route for photorealistic requests. After success, include the exact returned Markdown image link.';
+const GITHUB_TOOL = {
+  type: 'function',
+  function: {
+    name: 'github_api',
+    description: 'Use the connected GitHub PAT through the GitHub REST API. The token’s scopes and fine-grained repository permissions are enforced by GitHub; never ask for or expose the token. Use relative API paths such as /user, /user/repos, /repos/OWNER/REPO/issues, /repos/OWNER/REPO/contents/PATH, or /repos/OWNER/REPO/pulls.',
+    parameters: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method.' },
+        path: { type: 'string', description: 'Relative GitHub API path beginning with /. Never use a full URL.' },
+        body: { type: 'object', description: 'JSON request body for POST, PUT, or PATCH.' },
+      },
+      required: ['path'],
+    },
+  },
+};
+const GITHUB_TOOL_POLICY = 'A GitHub plugin is connected. Use github_api for GitHub work instead of asking the user to paste tokens or using terminal credentials. GitHub itself enforces the PAT scopes and fine-grained repository permissions. Explain write or destructive actions before making them, and never claim success unless the tool result confirms it.';
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; send: AgentSend;
+  provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
+  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; allowMemory: boolean; forceImageGeneration: boolean;
+  send: AgentSend;
 }): Promise<string> {
-  const messages: any[] = [{ role: 'system', content: TERMINAL_TOOL_POLICY }, ...options.body.messages];
+  const policies = [
+    ...(options.allowTerminal ? [TERMINAL_TOOL_POLICY] : []),
+    ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []),
+    ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []),
+    ...(options.allowMemory ? [MEMORY_TOOL_POLICY] : []),
+  ];
+  const messages: any[] = [...(policies.length ? [{ role: 'system', content: policies.join('\n\n') }] : []), ...options.body.messages];
   let toolCount = 0;
+  let imageCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
-      model: options.body.model,
-      messages,
-      stream: false,
-      temperature: options.body.temperature,
-      max_tokens: options.body.maxTokens,
-      tools: [TERMINAL_TOOL],
-      tool_choice: 'auto',
-    }, options.signal);
+    let turn: { response: any; streamedText: string };
+    try {
+      turn = await postProviderChat(options.url, options.headers, {
+        model: options.body.model,
+        messages,
+        // Keep tool turns non-streaming so the original assistant message (including provider-
+        // specific fields such as reasoning_content required by some APIs on tool follow-up) is
+        // preserved verbatim. Ordinary chat without tools still uses the streaming route below.
+        stream: false,
+        temperature: options.body.temperature,
+        max_tokens: options.body.maxTokens,
+        tools: [
+          ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
+          ...(options.allowImageTools ? [IMAGE_TOOL] : []),
+          ...(options.allowGitHubTools ? [GITHUB_TOOL] : []),
+          ...(options.allowMemory ? [MEMORY_TOOL, MEMORY_WRITE_TOOL] : []),
+        ],
+        tool_choice: round === 0 && options.forceImageGeneration
+          ? { type: 'function', function: { name: 'create_image' } }
+          : 'auto',
+      }, options.signal, delta => options.send('chunk', { delta }));
+    } catch (error) {
+      if (round === 0 && options.forceImageGeneration && options.allowImageTools) {
+        options.send('activity', { message: 'The provider rejected tool chat; using the image tool directly…' });
+        const prompt = providerText([...options.body.messages].reverse().find(message => message.role === 'user')?.content).trim();
+        const fallback = await createLocalImage({ prompt: options.imagePrompt || prompt, quality: 'high' }, options.signal, options);
+        if (fallback.output) {
+          options.send('media', fallback.output);
+          return fallback.output.markdown || '';
+        }
+        throw new Error(fallback.error || (error as Error)?.message || 'Image generation failed.');
+      }
+      throw error;
+    }
+    const { response, streamedText } = turn;
     const message = response?.choices?.[0]?.message;
     if (!message) throw new Error('Provider returned no assistant message for the tool-enabled request.');
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    if (!calls.length) return providerText(message.content);
+    if (!calls.length) return streamedText ? '' : providerText(message.content);
     messages.push(message);
     for (const call of calls) {
       const callId = String(call.id || randomUUID());
       let result: any;
       try {
         const args = typeof call.function?.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function?.arguments;
-        if (call.function?.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.function?.name || 'unknown')}`);
-        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
-        toolCount++;
-        result = await runAgentTerminal(args, options);
+        if (call.function?.name === 'terminal_run' && options.allowTerminal) {
+          if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+          toolCount++;
+          result = await runAgentTerminal(args, options);
+        } else if (call.function?.name === 'create_image' && options.allowImageTools) {
+          if (imageCount >= 2) throw new Error('This chat turn reached the safe limit of 2 generated images.');
+          imageCount++;
+          options.send('activity', { message: 'Creating the image locally…' });
+          result = await createLocalImage({ ...args, prompt: options.imagePrompt || args.prompt }, options.signal, options);
+          if (result.output) options.send('media', result.output);
+          else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
+        } else if (call.function?.name === 'github_api' && options.allowGitHubTools) {
+          result = await executeGitHubTool(args, options.signal);
+        } else if (call.function?.name === 'memory_read' && options.allowMemory) {
+          result = await executeMemoryRead();
+        } else if (call.function?.name === 'memory_write' && options.allowMemory) {
+          result = await executeMemoryWrite(args);
+        } else {
+          throw new Error(`Unsupported or disabled tool requested: ${String(call.function?.name || 'unknown')}`);
+        }
       } catch (error: any) {
         result = { error: error?.message || 'The requested tool call could not be run.' };
       }
@@ -582,34 +747,126 @@ async function runOpenAIAgent(options: {
   throw new Error('Provider exceeded the 10-round terminal tool-call limit without a final response.');
 }
 
+async function createLocalImage(input: unknown, signal: AbortSignal, context?: { provider: any; apiKey: string; referenceImages: string[] }): Promise<{ output?: any; error?: string }> {
+  const schema = z.object({
+    prompt: z.string().trim().min(1).max(2_000),
+    style: z.string().trim().max(1_000).optional(),
+    quality: z.enum(['standard', 'high']).default('standard'),
+    aspect_ratio: z.enum(['1:1', '4:3', '3:2', '16:9', '9:16']).default('16:9'),
+    negative_prompt: z.string().trim().max(1_000).optional(),
+    svg: z.string().trim().max(5_000_000).optional(),
+  });
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) return { error: 'The image-generation request was invalid.' };
+  if (signal.aborted) return { error: 'Image creation was cancelled.' };
+  const prompt = parsed.data.prompt;
+  const polishedPrompt = [prompt, parsed.data.style, parsed.data.negative_prompt ? `Avoid: ${parsed.data.negative_prompt}` : ''].filter(Boolean).join('\n');
+  try {
+    if (context && (parsed.data.quality === 'high' || context.referenceImages.length > 0 || !parsed.data.svg)) {
+      const raster = await generateProviderImage({ ...parsed.data, prompt: polishedPrompt }, context, signal);
+      if (raster) return { output: raster };
+    }
+    const svg = parsed.data.svg || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#101b45"/><stop offset="1" stop-color="#35b8d4"/></linearGradient></defs><rect width="1200" height="800" fill="url(#sky)"/><circle cx="950" cy="150" r="82" fill="#f5f0c8" opacity=".9"/><path d="M0 610L120 470 240 590 370 410 520 600 700 350 880 600 1030 450 1200 610V800H0Z" fill="#13243e"/><path d="M0 690L180 560 330 680 510 510 680 700 850 530 1010 690 1170 560 1200 590V800H0Z" fill="#091329"/><text x="600" y="740" text-anchor="middle" fill="#e8fbff" font-family="sans-serif" font-size="28">${escapeSvgText(prompt.slice(0, 80))}</text></svg>`;
+    const stored = storeGeneratedSvg(svg);
+    return { output: { kind: 'image', url: stored.url, downloadUrl: `${stored.url}?download=1`, prompt, markdown: `![Generated image](${stored.url})` } };
+  } catch (error: any) {
+    return { error: safeProviderError(error, 'Local image creation') };
+  }
+}
+
+async function generateProviderImage(input: { prompt: string; style?: string; quality: 'standard' | 'high'; aspect_ratio: string; negative_prompt?: string }, context: { provider: any; apiKey: string; referenceImages: string[] }, signal: AbortSignal): Promise<any | null> {
+  if (!['openai-compatible', 'custom'].includes(String(context.provider?.kind || ''))) return null;
+  const size = ({ '1:1': '1024x1024', '4:3': '1024x768', '3:2': '1536x1024', '16:9': '1536x864', '9:16': '864x1536' } as Record<string, string>)[input.aspect_ratio] || '1536x864';
+  const endpoint = appendEndpoint(context.provider.base_url, context.referenceImages.length ? '/images/edits' : '/images/generations');
+  const headers = Object.fromEntries(Object.entries({ ...(context.apiKey ? { Authorization: `Bearer ${context.apiKey}` } : {}), ...JSON.parse(context.provider.custom_headers || '{}') }).filter(([key]) => key.toLowerCase() !== 'content-type')) as Record<string, string>;
+  const prompt = `${input.prompt}${input.style ? `\nStyle: ${input.style}` : ''}`;
+  let response: Awaited<ReturnType<typeof fetch>>;
+  if (context.referenceImages.length) {
+    const image = dataUrlToBlob(context.referenceImages[0]);
+    if (!image) return null;
+    const form = new FormData();
+    form.append('model', 'gpt-image-1'); form.append('prompt', prompt); form.append('size', size); form.append('quality', input.quality); form.append('n', '1'); form.append('image', image, 'reference.png');
+    response = await fetch(endpoint, { method: 'POST', headers, body: form, signal });
+  } else {
+    response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'gpt-image-1', prompt, size, quality: input.quality, n: 1, response_format: 'b64_json' }), signal });
+  }
+  if (!response.ok) { void response.body?.cancel().catch(() => {}); return null; }
+  const json = await response.json().catch(() => null);
+  const item = json?.data?.[0];
+  let encoded = typeof item?.b64_json === 'string' ? item.b64_json : '';
+  if (!encoded && typeof item?.url === 'string' && /^https:\/\//i.test(item.url)) {
+    const imageResponse = await fetch(item.url, { signal });
+    if (imageResponse.ok) encoded = Buffer.from(await imageResponse.arrayBuffer()).toString('base64');
+  }
+  if (!encoded) return null;
+  const stored = storeGeneratedPng(encoded);
+  return { kind: 'image', url: stored.url, downloadUrl: `${stored.url}?download=1`, prompt: input.prompt, markdown: `![Generated image](${stored.url})` };
+}
+
+function dataUrlToBlob(value: string): Blob | null {
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  return match ? new Blob([Buffer.from(match[2], 'base64')], { type: `image/${match[1]}` }) : null;
+}
+
+function extractImageDataUrls(messages: { content: any }[]): string[] {
+  return messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part?.type === 'image_url' && typeof part.image_url?.url === 'string').map(part => part.image_url.url) : []).slice(0, 4);
+}
+
+function latestUserImagePrompt(messages: { role: string; content: any }[]): string {
+  const latest = [...messages].reverse().find(message => message.role === 'user');
+  if (!latest) return '';
+  if (Array.isArray(latest.content)) {
+    return latest.content.filter(part => part?.type === 'text').map(part => String(part.text || '')).join(' ').trim().slice(0, 2_000);
+  }
+  return typeof latest.content === 'string' ? latest.content.trim().slice(0, 2_000) : '';
+}
+
+function escapeSvgText(value: string): string {
+  return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character] || character));
+}
+
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
-  chatId: string; allowNetwork: boolean; send: AgentSend;
+  provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
+  chatId: string; allowNetwork: boolean; allowImageTools: boolean; allowGitHubTools: boolean; allowMemory: boolean; send: AgentSend;
 }): Promise<string> {
-  const system = [TERMINAL_TOOL_POLICY, ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
-  const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content }));
+  const system = [TERMINAL_TOOL_POLICY, ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []), ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []),
+    ...(options.allowMemory ? [MEMORY_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
+  const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) }));
   let toolCount = 0;
   for (let round = 0; round < 10; round++) {
-    const response = await postProviderJson(options.url, options.headers, {
+    const { response, streamedText } = await postAnthropicChat(options.url, options.headers, {
       model: options.body.model,
       messages,
       system,
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
-      tools: [ANTHROPIC_TERMINAL_TOOL],
-    }, options.signal);
+      tools: [ANTHROPIC_TERMINAL_TOOL, ...(options.allowImageTools ? [ANTHROPIC_IMAGE_TOOL] : []), ...(options.allowGitHubTools ? [ANTHROPIC_GITHUB_TOOL] : []), ...(options.allowMemory ? [ANTHROPIC_MEMORY_READ_TOOL, ANTHROPIC_MEMORY_WRITE_TOOL] : [])],
+      stream: false,
+    }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
     const calls = blocks.filter((block: any) => block?.type === 'tool_use');
-    if (!calls.length) return blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
+    if (!calls.length) return streamedText ? '' : blocks.filter((block: any) => block?.type === 'text').map((block: any) => String(block.text || '')).join('');
     messages.push({ role: 'assistant', content: blocks });
     const toolResults = [];
     for (const call of calls) {
       let result: any;
       try {
-        if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
-        if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
-        toolCount++;
-        result = await runAgentTerminal(call.input, options);
+        if (call.name === 'create_image' && options.allowImageTools) {
+          result = await createLocalImage({ ...call.input, prompt: options.imagePrompt || call.input?.prompt }, options.signal, options);
+          if (result.output) options.send('media', result.output);
+        } else if (call.name === 'github_api' && options.allowGitHubTools) {
+          result = await executeGitHubTool(call.input, options.signal);
+        } else if (call.name === 'memory_read' && options.allowMemory) {
+          result = await executeMemoryRead();
+        } else if (call.name === 'memory_write' && options.allowMemory) {
+          result = await executeMemoryWrite(call.input);
+        } else {
+          if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
+          if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
+          toolCount++;
+          result = await runAgentTerminal(call.input, options);
+        }
       } catch (error: any) {
         result = { error: error?.message || 'The requested tool call could not be run.' };
       }
@@ -637,22 +894,221 @@ async function runAgentTerminal(input: unknown, options: {
   });
 }
 
-async function postProviderJson(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<any> {
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+async function postProviderChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
     throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
   }
-  const text = await response.text();
-  if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
-  try { return JSON.parse(text); }
-  catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let assistantText = '';
+  let finishReason = '';
+  const calls = new Map<number, any>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.error) throw new Error(String(event.error.message || 'Provider streaming request failed.'));
+    const choice = event?.choices?.[0];
+    if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason;
+    const delta = choice?.delta;
+    if (typeof delta?.content === 'string' && delta.content) {
+      assistantText += delta.content;
+      if (assistantText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+      onTextDelta(delta.content);
+    }
+    if (!Array.isArray(delta?.tool_calls)) return;
+    for (const toolDelta of delta.tool_calls) {
+      const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : calls.size;
+      const call = calls.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } };
+      if (typeof toolDelta?.id === 'string') call.id = toolDelta.id;
+      if (typeof toolDelta?.type === 'string') call.type = toolDelta.type;
+      if (typeof toolDelta?.function?.name === 'string') call.function.name += toolDelta.function.name;
+      if (typeof toolDelta?.function?.arguments === 'string') call.function.arguments += toolDelta.function.arguments;
+      calls.set(index, call);
+    }
+  });
+  if (!sawDone && !finishReason) throw new Error('Provider stream ended before the response was complete.');
+
+  const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+  return {
+    response: { choices: [{ message: { role: 'assistant', content: assistantText || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) } }] },
+    streamedText: assistantText,
+  };
+}
+
+async function postAnthropicChat(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  signal: AbortSignal,
+  onTextDelta: (delta: string) => void,
+): Promise<{ response: any; streamedText: string }> {
+  const response = await fetchToolEnabledResponse(url, headers, body, signal);
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(response.status, 'Tool-enabled chat request');
+  }
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/event-stream')) {
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+    try { return { response: JSON.parse(text), streamedText: '' }; }
+    catch { throw new Error('Provider returned invalid JSON for the tool-enabled request.'); }
+  }
+
+  let streamedText = '';
+  let stopReason: string | undefined;
+  let messageStopped = false;
+  const blocks = new Map<number, any>();
+  const partialInputs = new Map<number, string>();
+  const sawDone = await readProviderSse(response, event => {
+    if (event?.type === 'error' || event?.error) throw new Error(String(event?.error?.message || 'Provider streaming request failed.'));
+    if (event?.type === 'message_stop') messageStopped = true;
+    if (event?.type === 'message_delta' && typeof event.delta?.stop_reason === 'string') stopReason = event.delta.stop_reason;
+    const index = Number.isInteger(event?.index) ? event.index : 0;
+    if (event?.type === 'content_block_start' && event.content_block && typeof event.content_block === 'object') {
+      blocks.set(index, { ...event.content_block });
+      return;
+    }
+    if (event?.type === 'content_block_delta') {
+      const block = blocks.get(index) || {};
+      if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+        block.text = `${block.text || ''}${event.delta.text}`;
+        streamedText += event.delta.text;
+        if (streamedText.length > 2_000_000) throw new Error('Provider response exceeded the 2 MB limit.');
+        onTextDelta(event.delta.text);
+      } else if (event.delta?.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
+        partialInputs.set(index, `${partialInputs.get(index) || ''}${event.delta.partial_json}`);
+      }
+      blocks.set(index, block);
+      return;
+    }
+    if (event?.type === 'content_block_stop') {
+      const partial = partialInputs.get(index);
+      if (partial) {
+        try { (blocks.get(index) || {}).input = JSON.parse(partial); }
+        catch { throw new Error('Provider returned invalid tool arguments in its streaming response.'); }
+        partialInputs.delete(index);
+      }
+    }
+  });
+  if (!sawDone && !messageStopped) throw new Error('Provider stream ended before the response was complete.');
+  return { response: { content: [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block), stop_reason: stopReason }, streamedText };
+}
+
+type ProviderFetchResponse = Awaited<ReturnType<typeof fetch>>;
+
+async function fetchToolEnabledResponse(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal): Promise<ProviderFetchResponse> {
+  const request = (requestBody: unknown) => fetch(url, {
+    method: 'POST', headers, body: JSON.stringify(requestBody), signal,
+  });
+  const first = await request(body);
+  if (first.status !== 400 || !body || typeof body !== 'object' || Array.isArray(body)) return first;
+
+  const original = body as Record<string, unknown>;
+  let response = first;
+  let retryBody = original;
+  if (original.stream === true) {
+    // Some otherwise compatible providers reject SSE when tools are present. Retry the same
+    // tool request as JSON; permissions and tool definitions remain unchanged.
+    void response.body?.cancel().catch(() => {});
+    retryBody = { ...original, stream: false };
+    response = await request(retryBody);
+    if (response.status !== 400) return response;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(retryBody, 'tool_choice')) {
+    // Several OpenAI-compatible endpoints support function tools but reject an explicit
+    // `tool_choice: "auto"`. Omitting it preserves the tools and lets the endpoint use its
+    // documented default. This also lets models choose a tool after a forced-image attempt.
+    void response.body?.cancel().catch(() => {});
+    const compatibleBody = { ...retryBody };
+    delete compatibleBody.tool_choice;
+    response = await request(compatibleBody);
+  }
+  return response;
+}
+
+async function readProviderSse(response: Pick<ProviderFetchResponse, 'body'>, onEvent: (event: any) => void): Promise<boolean> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Provider returned an empty streaming response.');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let receivedBytes = 0;
+  let finished = false;
+  let sawDone = false;
+  const parseBlock = (block: string) => {
+    const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
+    if (!data) return;
+    if (data === '[DONE]') { finished = true; sawDone = true; return; }
+    try { onEvent(JSON.parse(data)); }
+    catch (error: any) {
+      if (error instanceof SyntaxError) throw new Error('Provider returned invalid JSON in its streaming response.');
+      throw error;
+    }
+  };
+  try {
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > 2_000_000) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Provider response exceeded the 2 MB limit.');
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        parseBlock(block);
+        if (finished) break;
+      }
+    }
+    if (!finished) buffer += decoder.decode();
+    if (!finished && buffer.trim()) parseBlock(buffer);
+    return sawDone;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function providerText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('');
   return '';
+}
+
+function hasExplicitImageRequest(messages: { role: string; content: any }[]): boolean {
+  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user');
+  const text = providerText(latestUserMessage?.content);
+  const image = '(?:image|picture|photo|illustration|artwork|logo|poster|icon|thumbnail)';
+  const creation = '(?:create|generate|make|draw|paint|illustrate|render|design)';
+  return new RegExp(`\\b${creation}\\b[\\s\\S]{0,120}\\b${image}\\b`, 'i').test(text)
+    || new RegExp(`\\b${image}\\b[\\s\\S]{0,120}\\b${creation}\\b`, 'i').test(text)
+    || new RegExp(`\\b(?:need|want|would like|looking for)\\b[\\s\\S]{0,80}\\b${image}\\b`, 'i').test(text)
+    || new RegExp(`\\b(?:can you|could you|please)\\b[\\s\\S]{0,80}\\b(?:give me|show me)\\b[\\s\\S]{0,40}\\b${image}\\b`, 'i').test(text);
+}
+
+function toAnthropicContent(content: any): any {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const blocks: any[] = [];
+  for (const part of content) {
+    if (part?.type === 'text' && typeof part.text === 'string') blocks.push({ type: 'text', text: part.text });
+    if (part?.type !== 'image_url' || typeof part.image_url?.url !== 'string') continue;
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/.exec(part.image_url.url);
+    if (match) blocks.push({ type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } });
+  }
+  return blocks;
 }
 
 async function listModelsForProvider(row: any, apiKey: string): Promise<ModelInfo[]> {
@@ -690,6 +1146,9 @@ function safeProviderStatusError(status: number, operation: string): string {
   const detail = status === 401 || status === 403 ? 'authentication was rejected'
     : status === 404 ? 'the endpoint was not found'
     : status === 429 ? 'the provider rate limit was reached'
+    : status === 400 && operation === 'Tool-enabled chat request' ? 'the provider rejected the tool-enabled request; Gnito could not determine whether the cause is the endpoint, model, or request format'
+    : status === 400 && operation === 'Image generation' ? 'the image endpoint rejected the request; check Images API support and the selected image model/size'
+    : status === 400 && operation === 'Vision chat request' ? 'the provider rejected image input; choose a vision-capable model and supported image format'
     : status === 400 ? 'the request was rejected; check the model ID and request settings'
     : status >= 500 ? 'the provider returned a server error'
     : 'the provider rejected the request';

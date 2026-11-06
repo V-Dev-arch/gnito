@@ -8,6 +8,7 @@ import { ProviderLogo } from '../../ui/ProviderLogo';
 interface Provider {
   id: string; kind: string; label: string; baseUrl: string; enabled: boolean; hasKey: boolean;
 }
+interface MemoryEntry { id: string; key: string; value: string; reason?: string }
 
 function providerPresetFor(provider: Provider): ProviderPreset {
   return PROVIDER_PRESETS.find(p => provider.baseUrl.replace(/\/$/, '').startsWith(p.baseUrl.replace(/\/$/, '')))
@@ -37,6 +38,8 @@ export function SettingsPage() {
   const [backupPassword, setBackupPassword] = useState('');
   const [backups, setBackups] = useState<any[]>([]);
   const [restoreInfo, setRestoreInfo] = useState({ path: '', password: '' });
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState({ key: '', value: '', reason: '' });
   const [error, setError] = useState<string | null>(null);
   const { push } = useToast();
 
@@ -48,6 +51,7 @@ export function SettingsPage() {
       setSearchBackendDraft(loadedSettings['workspace.searchBackend'] || '');
       setDiagnostics(await api.get('/api/diagnostics'));
       setBackups(await api.get('/api/backup/list'));
+      setMemoryEntries(await api.get('/api/memory'));
     } catch (e: any) { setError(e.message); }
   };
   useEffect(() => { load(); }, []);
@@ -96,6 +100,21 @@ export function SettingsPage() {
     api.put(`/api/settings/${key}`, { value }).then(() => load()).catch(e => push(e.message, 'error'));
   };
 
+  const saveMemoryEntry = async () => {
+    if (!memoryDraft.key.trim() || !memoryDraft.value.trim()) { push('Memory key and value are required.', 'error'); return; }
+    try {
+      await api.post('/api/memory', { key: memoryDraft.key.trim(), value: memoryDraft.value.trim(), reason: memoryDraft.reason.trim() });
+      setMemoryDraft({ key: '', value: '', reason: '' });
+      push('Memory saved.', 'success');
+      load();
+    } catch (e: any) { push(e.message, 'error'); }
+  };
+
+  const deleteMemoryEntry = async (id: string) => {
+    try { await api.delete(`/api/memory/${id}`); setMemoryEntries(entries => entries.filter(entry => entry.id !== id)); push('Memory entry deleted.', 'success'); }
+    catch (e: any) { push(e.message, 'error'); }
+  };
+
   const saveSearchBackend = async (override?: string) => {
     const value = (override ?? searchBackendDraft).trim();
     if (value) {
@@ -109,7 +128,7 @@ export function SettingsPage() {
     }
     try {
       await api.put('/api/settings/workspace.searchBackend', { value });
-      push(value ? 'Search backend saved.' : 'Default Brave Search restored.', 'success');
+      push(value ? 'Search backend saved.' : 'Automatic public search fallback restored.', 'success');
       await load();
     } catch (e: any) { push(e.message, 'error'); }
   };
@@ -276,6 +295,23 @@ export function SettingsPage() {
                 Delete all
               </button>
             </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="settings-row-label">Your memory</div>
+              <div className="settings-row-desc">Read, write, and delete the facts the AI may use. Memory tools are available to AI only when memory is enabled.</div>
+              <div className="field-row" style={{ marginTop: 10 }}>
+                <input className="input" placeholder="Key, e.g. preferred_language" value={memoryDraft.key} onChange={event => setMemoryDraft({ ...memoryDraft, key: event.target.value })} />
+                <input className="input" placeholder="Value" value={memoryDraft.value} onChange={event => setMemoryDraft({ ...memoryDraft, value: event.target.value })} />
+                <input className="input" placeholder="Why it is useful (optional)" value={memoryDraft.reason} onChange={event => setMemoryDraft({ ...memoryDraft, reason: event.target.value })} />
+                <button className="btn btn-primary btn-sm" onClick={saveMemoryEntry} disabled={settings['memory.enabled'] !== 'true'}>Save</button>
+              </div>
+              {memoryEntries.length === 0 ? <div className="settings-row-desc" style={{ marginTop: 10 }}>No saved memories yet.</div> : memoryEntries.map(entry => (
+                <div className="settings-row" key={entry.id} style={{ marginTop: 8 }}>
+                  <div><div className="settings-row-label">{entry.key}</div><div className="settings-row-desc">{entry.value}{entry.reason ? ` · ${entry.reason}` : ''}</div></div>
+                  <button className="btn btn-danger btn-sm" onClick={() => deleteMemoryEntry(entry.id)}>Delete</button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -303,15 +339,15 @@ export function SettingsPage() {
           <div className="card">
             <div className="card-title">Web search backend</div>
             <div className="card-description">
-              Leave this blank to use Brave Search. Gnito no longer retries through DuckDuckGo. CAPTCHA and anti-bot challenge pages are discarded and never sent to the model. If Brave is unavailable, try again later or configure a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Search snippets are treated as untrusted content.
+              Leave this blank to try Brave Search, Bing, then DuckDuckGo automatically when a provider is rate-limited or returns a challenge. CAPTCHA and anti-bot pages are discarded and never sent to the model. If all built-ins fail, try again later or configure a public HTTPS SearXNG endpoint; private, local, link-local and special-use IP ranges are blocked, including DNS results, and redirects are not followed. Search snippets are treated as untrusted content.
             </div>
             <div className="field">
               <label className="label" htmlFor="search-backend">Search endpoint URL</label>
-              <input id="search-backend" className="input" value={searchBackendDraft} onChange={event => setSearchBackendDraft(event.target.value)} placeholder="Default Brave Search" data-testid="input-search-backend" />
+              <input id="search-backend" className="input" value={searchBackendDraft} onChange={event => setSearchBackendDraft(event.target.value)} placeholder="Automatic fallback: Brave, Bing, DuckDuckGo" data-testid="input-search-backend" />
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button className="btn btn-primary" onClick={() => void saveSearchBackend()} data-testid="button-save-search-backend">Save endpoint</button>
-              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use default Brave Search</button>
+              <button className="btn btn-secondary" onClick={() => { setSearchBackendDraft(''); void saveSearchBackend(''); }} data-testid="button-default-search-backend">Use automatic search</button>
             </div>
           </div>
         )}

@@ -6,9 +6,12 @@ import { useToast } from '../../lib/toast';
 interface Automation {
   id: string; prompt: string; schedule: { expression: string; timezone: string; kind: string };
   taskInstruction: string; status: string; missedRunPolicy: string; dryRun: boolean;
-  maxSteps: number; nextRunAt?: number;
+  maxSteps: number; providerId?: string; modelId?: string; nextRunAt?: number;
+  allowTerminal: boolean; allowNetwork: boolean; allowTools: boolean;
 }
 interface Run { id: string; status: string; startedAt?: number; endedAt?: number; resultSummary?: string; error?: string }
+interface Provider { id: string; label: string; kind: string; enabled: boolean }
+interface ModelInfo { id: string; label: string }
 
 const MISSED_RUN_WARNING =
   'Your computer must stay on and the Gnito app must remain running to complete scheduled tasks. ' +
@@ -27,11 +30,34 @@ export function AutomationsPage() {
   const [kind, setKind] = useState<'recurring' | 'one-shot'>('recurring');
   const [missedPolicy, setMissedPolicy] = useState<'skip' | 'run-once-on-startup' | 'catch-up-within-window'>('skip');
   const [dryRun, setDryRun] = useState(true);
+  const [allowTerminal, setAllowTerminal] = useState(false);
+  const [allowNetwork, setAllowNetwork] = useState(false);
+  const [allowTools, setAllowTools] = useState(false);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [providerId, setProviderId] = useState('');
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelId, setModelId] = useState('');
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState('');
   const [error, setError] = useState<string | null>(null);
   const { push } = useToast();
 
   const load = () => api.get('/api/automations').then(setAutomations).catch(e => setError(e.message));
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    api.get('/api/providers').then((items: Provider[]) => {
+      const enabled = items.filter(item => item.enabled);
+      setProviders(enabled);
+      if (!providerId && enabled[0]) setProviderId(enabled[0].id);
+    }).catch(e => setError(e.message));
+  }, []);
+  useEffect(() => {
+    if (!providerId) { setModels([]); setModelId(''); return; }
+    setModelsLoading(true); setModelsError(''); setModels([]); setModelId('');
+    api.get(`/api/providers/${providerId}/models`).then((result: { models: ModelInfo[] }) => {
+      setModels(result.models || []); setModelId(result.models?.[0]?.id || '');
+    }).catch(e => setModelsError(e.message || 'Could not load models.')).finally(() => setModelsLoading(false));
+  }, [providerId]);
 
   const openDetail = async (a: Automation) => {
     setSelected(a);
@@ -41,10 +67,12 @@ export function AutomationsPage() {
 
   const create = async () => {
     if (!prompt.trim() || !expression.trim()) { push('Fill in prompt and schedule.', 'error'); return; }
+    if (!providerId || !modelId) { push('Select a provider and model for this automation.', 'error'); return; }
     try {
       const r = await api.post('/api/automations', {
-        prompt, taskInstruction, schedule: { expression, timezone, kind },
+        prompt, taskInstruction, providerId, modelId, schedule: { expression, timezone, kind },
         missedRunPolicy: missedPolicy, dryRun, maxSteps: 10, maxRetries: 1, retryBackoffMs: 30_000,
+        allowTerminal, allowNetwork: allowTerminal && allowNetwork, allowTools,
       });
       await api.post(`/api/automations/${r.id}/activate`);
       push('Automation created and activated.', 'success');
@@ -104,6 +132,37 @@ export function AutomationsPage() {
           </div>
           <div className="field-row">
             <div className="field">
+              <label className="label" htmlFor="au-provider">Provider</label>
+              <select id="au-provider" className="select" value={providerId} onChange={e => setProviderId(e.target.value)} data-testid="select-automation-provider">
+                <option value="">Select a provider…</option>
+                {providers.map(provider => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="au-model">Model</label>
+              {models.length > 0 ? <select id="au-model" className="select" value={modelId} onChange={e => setModelId(e.target.value)} data-testid="select-automation-model">{models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</select> : <input id="au-model" className="input" value={modelId} onChange={e => setModelId(e.target.value)} placeholder={modelsLoading ? 'Loading models…' : 'Model ID'} data-testid="input-automation-model" />}
+              {modelsError && <div className="settings-row-desc" style={{ color: 'var(--color-error)' }}>{modelsError} Enter a model ID manually.</div>}
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
+              <label className="label">Automation permissions</label>
+              <div className="settings-row" style={{ border: 'none', padding: '4px 0' }}>
+                <div><div className="settings-row-label">Terminal</div><div className="settings-row-desc">Let the AI run commands in Gnito’s isolated Docker workspace.</div></div>
+                <button className={`toggle ${allowTerminal ? 'on' : ''}`} onClick={() => { setAllowTerminal(value => !value); if (allowTerminal) setAllowNetwork(false); }} role="switch" aria-checked={allowTerminal} aria-label="Terminal access" data-testid="toggle-automation-terminal"><span className="toggle-thumb" /></button>
+              </div>
+              <div className="settings-row" style={{ border: 'none', padding: '4px 0' }}>
+                <div><div className="settings-row-label">Network</div><div className="settings-row-desc">Allow terminal commands to access the internet.</div></div>
+                <button className={`toggle ${allowNetwork && allowTerminal ? 'on' : ''}`} onClick={() => setAllowNetwork(value => !value)} disabled={!allowTerminal} role="switch" aria-checked={allowNetwork && allowTerminal} aria-label="Automation network access" data-testid="toggle-automation-network"><span className="toggle-thumb" /></button>
+              </div>
+              <div className="settings-row" style={{ border: 'none', padding: '4px 0' }}>
+                <div><div className="settings-row-label">Tools</div><div className="settings-row-desc">Allow the AI to use enabled agent tools during the run.</div></div>
+                <button className={`toggle ${allowTools ? 'on' : ''}`} onClick={() => setAllowTools(value => !value)} role="switch" aria-checked={allowTools} aria-label="Automation tools" data-testid="toggle-automation-tools"><span className="toggle-thumb" /></button>
+              </div>
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="field">
               <label className="label" htmlFor="au-missed">Missed-run policy</label>
               <select id="au-missed" className="select" value={missedPolicy} onChange={e => setMissedPolicy(e.target.value as any)}>
                 <option value="skip">Skip missed</option>
@@ -147,7 +206,7 @@ export function AutomationsPage() {
               <div style={{ flex: 1 }}>
                 <div className="automation-title">{a.prompt.slice(0, 80)}{a.prompt.length > 80 ? '…' : ''}</div>
                 <div className="automation-meta">
-                  {a.schedule.kind} · {a.schedule.expression} · {a.schedule.timezone}
+                  {a.schedule.kind} · {a.schedule.expression} · {a.schedule.timezone} · {providers.find(p => p.id === a.providerId)?.label || 'Provider not configured'} · {a.modelId || 'Model not configured'} · terminal {a.allowTerminal ? 'on' : 'off'} · network {a.allowNetwork ? 'on' : 'off'} · tools {a.allowTools ? 'on' : 'off'}
                   {a.nextRunAt ? ` · next: ${new Date(a.nextRunAt).toLocaleString()}` : ''}
                 </div>
               </div>
@@ -182,7 +241,7 @@ export function AutomationsPage() {
           <div className="card-title">Automation detail</div>
           <div className="card-description">{selected.taskInstruction}</div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
-            Missed-run policy: {selected.missedRunPolicy} · dry-run: {String(selected.dryRun)} · max steps: {selected.maxSteps}
+            Missed-run policy: {selected.missedRunPolicy} · dry-run: {String(selected.dryRun)} · max steps: {selected.maxSteps} · provider: {providers.find(p => p.id === selected.providerId)?.label || 'not configured'} · model: {selected.modelId || 'not configured'} · terminal: {selected.allowTerminal ? 'on' : 'off'} · network: {selected.allowNetwork ? 'on' : 'off'} · tools: {selected.allowTools ? 'on' : 'off'}
           </div>
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 8 }}>Run history</div>
