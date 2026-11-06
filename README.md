@@ -1,156 +1,214 @@
-# Gnito
+# Gnito — NEXUS
 
-**Your AI. Your Machine. Your Rules.**
+**A local-first AI developer operating environment.**
 
-Gnito is an open-source, local-first, self-hosted AI workspace. It runs on
-your computer, stores your data on your machine, and connects to any
-OpenAI- or Anthropic-compatible model provider you choose (BYOK — bring
-your own key).
+Gnito is an open-source, self-hosted workspace for developers who want an AI system close to their code, files, tools, and data. It runs on your machine, keeps persistent state in a local data directory, and connects to the model providers you choose through a bring-your-own-key (BYOK) configuration.
+
+The current frontend direction is **NEXUS**: a futuristic but practical developer environment built around an icon rail, workspace drawer, command-oriented chat canvas, optional inspector, terminal tooling, files, projects, plugins, and automations. The interface is designed for long development sessions rather than for a generic AI dashboard.
 
 > [!IMPORTANT]
-> Gnito is not free to run against external providers: usage costs,
-> quotas, rate limits, and data policies depend entirely on the provider
-> you configure. Image generation can incur additional provider charges.
-> Gnito does not bundle a model.
+> Gnito does not bundle or subsidize a model. External provider usage can incur charges, quotas, rate limits, and data-processing policies determined by the provider you configure. Image generation may incur additional provider charges. Review provider terms and every tool/network permission before use.
+
+## Preview
+
+### NEXUS command deck
+
+![Gnito NEXUS command deck](docs/screenshots/gnito-nexus-desktop.png)
+
+### NEXUS cyan workspace
+
+![Gnito NEXUS workspace](docs/screenshots/gnito-nexus-command-deck.png)
+
+The screenshots show the first-run workspace. After a provider is configured, the same canvas becomes the full conversation and developer command surface.
+
+## Why Gnito exists
+
+Most AI chat applications separate the assistant from the environment where development actually happens. Gnito is designed around the opposite idea: the assistant, conversation history, files, terminal, projects, providers, automations, and plugins belong to one local workspace.
+
+The project is made for people who want:
+
+- Control over which provider receives a request.
+- Local persistence for chats, projects, memory, settings, automations, and tool history.
+- Explicit, per-message permission for terminal execution, network access, web search, and image tools.
+- A developer-oriented environment instead of a chat-only interface.
+- A self-hosted system that can work with cloud providers, local models, or compatible private endpoints.
+
+Gnito preserves the underlying product capabilities while allowing the frontend experience to evolve independently. The NEXUS branch is a visual and interaction transformation, not a replacement backend.
 
 ## Features
 
-- **Local-first**: SQLite database and file storage under `~/.gnito/`.
-  Nothing leaves your machine unless you configure a provider.
-- **BYOK providers**: connect OpenAI, Anthropic, Ollama, LM Studio, vLLM,
-  or any OpenAI/Anthropic-compatible endpoint. Keys are encrypted at rest.
-- **Streaming chat**: real-time SSE streaming with cancel, retry, and edit.
-- **Prompt attachments**: attach up to four local PNG/JPEG/WebP/GIF images or
-  text/code files (up to 180 KiB each); files are sent for this message only,
-  so reattach them for follow-ups. Image input requires a vision-capable model.
-- **Image generation**: explicitly enable Image tools to let the AI create polished
-  raster images through the configured compatible provider. Reference-image
-  attachments, style, quality, aspect-ratio, and negative-prompt controls are
-  supported; generated media is stored locally and shown inline with a download
-  button. A local SVG fallback is available when raster generation is unavailable.
-- **Projects**: organize chats + per-project instructions.
-- **Files**: browse and edit files in folders you explicitly approve
-  (least-privilege grants, path-traversal defenses).
-- **Web search**: opt-in per chat turn; source links are saved with the chat and
-  passed to the selected model as untrusted evidence. Configure a public HTTPS
-  SearXNG JSON endpoint in Tools & Search, or use the built-in public fallbacks.
-- **Terminal**: one-shot commands in a Docker-only isolated workspace, with
-  visible command/output history, safe image/video previews and downloads, and no host-shell fallback.
-- **Files**: read/write/delete tools respect approved folder permissions and
-  record runs in the local audit history.
-- **AI tool chaining**: terminal execution is explicitly enabled per message;
-  image tools are separately opt-in. A dedicated network opt-in enables Docker
-  bridge access, and the sandbox includes `ffmpeg` for video creation.
-- **GitHub plugin**: connect a GitHub personal access token (PAT), stored in the
-  encrypted local vault. The AI can use GitHub REST API read/write operations,
-  while GitHub enforces the scopes and fine-grained permissions granted to the PAT.
-- **Memory**: opt-in local memory that both the user and AI can read and write.
-  Ask the AI to remember a durable preference or fact, review and delete entries
-  in Settings, and use Incognito Mode when memory persistence is not wanted.
-- **Automation Center**: schedule natural-language tasks via the local backend
-  scheduler (cron), bind each automation to a specific provider and model, and
-  configure missed-run policy, dry-run mode, terminal, network, and tool access.
-  Scheduled conversations show their run duration and completion time.
-- **Incognito Mode**: temporary chats held in memory only. Never written
-  to history, memory, or backups.
-- **Encrypted backup**: AES-256-GCM + scrypt key derivation, password-protected.
-- **Command palette** (Ctrl/Cmd+K) and accessible keyboard navigation.
+### AI workspace
 
-## Install
+- Streaming chat over SSE with cancel, retry, edit, and message actions.
+- OpenAI-compatible, Anthropic-compatible, Ollama, LM Studio, vLLM, and custom provider endpoints.
+- Provider and model selection inside the chat command surface.
+- Prompt attachments for up to four local images or text/code files per message.
+- Markdown, GitHub-Flavored Markdown, syntax-highlighted code, and generated media previews.
+- Opt-in web search with source links retained alongside the conversation.
+- Explicit per-message terminal, network, and image-tool permissions.
 
-Requires Node.js 20.19+. Docker Engine or Docker Desktop is optional for the
-rest of Gnito, but required for Terminal. Build its prepared image from the
-repository root with the command in [the terminal sandbox guide](docs/terminal-sandbox.md).
+### Developer tools
+
+- **Terminal:** one-shot commands inside a restricted Docker workspace with visible command/output history.
+- **Files:** browse, read, edit, and delete files only inside explicitly approved folders.
+- **Projects:** group chats and project-specific instructions.
+- **Plugins:** extend Gnito with integrations such as the GitHub plugin.
+- **Automation Center:** schedule provider/model-specific natural-language tasks through the local scheduler.
+- **Command Center:** keyboard-first navigation and actions with `Ctrl/Cmd+K`.
+
+### Privacy and safety
+
+- Local SQLite database and file storage under `~/.gnito/` by default.
+- Provider keys encrypted at rest in the local vault.
+- Incognito chats held temporarily and excluded from history, memory, and backups.
+- Session-token and CSRF protection on API routes.
+- Terminal commands run in a dedicated Docker sandbox; host-shell fallback is not used.
+- Docker networking is disabled unless explicitly enabled for a specific message.
+- Path traversal and symlink escapes are blocked on file routes.
+- Encrypted password-protected backups using AES-256-GCM and scrypt.
+
+## Architecture
+
+Gnito is a TypeScript application with a Vite/React client and a Node server.
+
+```text
+src/
+├── client/
+│   ├── App.tsx                 # client routing and app composition
+│   ├── ui/AppShell.tsx         # NEXUS rail, drawer, canvas, and inspector shell
+│   ├── features/chat/          # chat state, streaming, tools, attachments, markdown
+│   ├── features/files/         # approved-folder file workflows
+│   ├── features/terminal/      # terminal UI and command history
+│   ├── features/projects/      # project workspace UI
+│   ├── features/automations/   # scheduled task UI
+│   ├── features/plugins/       # plugin management UI
+│   ├── features/settings/      # provider, memory, privacy, and app settings
+│   └── styles/                 # base tokens plus the active NEXUS visual system
+├── server/                     # APIs, auth, providers, storage, scheduler, sandbox
+└── shared/                     # shared types and provider definitions
+```
+
+The frontend communicates with the existing backend APIs. The redesign does not replace provider adapters, database code, authentication, storage, terminal isolation, or scheduled-task execution.
+
+## Quick start
+
+### Requirements
+
+- Node.js **20.19 or newer**.
+- Docker Engine or Docker Desktop is optional for chat and most UI features, but required for Terminal and agent command execution.
+- A compatible model provider and API key, unless you plan to use a local provider such as Ollama or LM Studio.
+
+### Development
 
 ```bash
-git clone <your-fork> gnito
+git clone https://github.com/V-Dev-arch/gnito.git
 cd gnito
 npm install
 npm run dev
 ```
 
-Then open http://localhost:5173 (dev) or http://127.0.0.1:8377 (prod).
+Open [http://localhost:5173](http://localhost:5173).
 
-For video work, enable **Allow terminal** and **Network** in chat, then ask
-Gnito to clone [OpenMontage](https://github.com/calesthio/OpenMontage), follow
-its README, and save the result under `/workspace`. The model can return a
-safe inline preview and a download link for images/videos created there. Network
-access is a per-message opt-in; review the command and any external service or
-provider cost before proceeding.
+The development command runs the Vite client and the local API server together. The API server listens on `127.0.0.1:8377` by default while Vite serves the development client on port `5173`.
 
-### Memory
-
-Enable **Memory** under **Settings → Memory & Privacy** before asking Gnito to
-remember something. For example:
-
-> Remember that I prefer concise answers and use metric units.
-
-The AI may save durable preferences, goals, and useful facts through its memory
-tools. It must not save passwords, API keys, or other highly sensitive data.
-Memory entries can be read, added, and deleted manually from the same settings
-panel. Memory tools are automatically available to normal chats while Memory is
-enabled; Incognito chats never persist or access local memory.
-
-### GitHub plugin
-
-Open **Plugins → GitHub**, enter a PAT created with only the scopes and repository
-permissions required for your work, and connect it. The PAT is encrypted locally
-and is never sent to the model. The AI uses the plugin’s GitHub REST API tool, and
-GitHub rejects operations outside the token’s permissions. Review write or
-destructive actions before asking the AI to perform them.
-
-## Production
+### Production
 
 ```bash
+npm install
 npm run build
 npm start
 ```
 
-The server binds to `127.0.0.1:8377` by default and serves the built
-frontend + API from one origin.
+The production server serves the built frontend and API from one origin at [http://127.0.0.1:8377](http://127.0.0.1:8377).
+
+### Useful development commands
+
+```bash
+npm run typecheck   # TypeScript validation for server and client
+npm run lint        # ESLint with warnings treated as errors
+npm test            # Vitest unit and integration suite
+npm run build       # Production client and server build
+```
+
+## First-run setup
+
+1. Start Gnito with `npm run dev`.
+2. Open **Settings** from the NEXUS rail or workspace drawer.
+3. Add a provider and enter the model identifier if model discovery is unavailable.
+4. Return to **New Chat** and choose the provider/model in the composer.
+5. Enable only the tools needed for the current message.
+
+Provider keys are stored in the encrypted local vault. Gnito does not send keys to the browser or include them in model prompts.
+
+## Terminal sandbox
+
+Terminal execution is intentionally opt-in and isolated. Build the prepared image using the instructions in [`docs/terminal-sandbox.md`](docs/terminal-sandbox.md), then enable **Allow terminal** in a chat message.
+
+Network access is a separate per-message permission. When enabled, commands can use Docker bridge networking; otherwise command networking is disabled. The sandbox includes `ffmpeg` for local media workflows and exposes only the dedicated Gnito workspace, not the host filesystem.
+
+For video workflows, enable **Allow terminal** and **Network**, then ask Gnito to clone [OpenMontage](https://github.com/calesthio/OpenMontage), follow its README, and save output under `/workspace`. Review commands and any external service or provider charges before proceeding.
+
+## Memory and Incognito
+
+Enable Memory under **Settings → Memory & Privacy** before asking Gnito to remember a preference:
+
+> Remember that I prefer concise answers and use metric units.
+
+Memory is local, opt-in, user-editable, and excluded from Incognito sessions. Incognito conversations are temporary and are not written to chat history, memory, or backups. External providers may still process anything you send to them.
 
 ## Data location
 
-Everything Gnito saves lives under `~/.gnito/` (configurable via
-`GNITO_DATA_DIR`):
+Everything Gnito persists lives under `~/.gnito/`, configurable with `GNITO_DATA_DIR`:
 
-| Path | What |
+| Path | Contents |
 |---|---|
-| `~/.gnito/gnito.db` | SQLite database (chats, projects, memory, automations, settings, and tool runs) |
-| `~/.gnito/secrets.enc` | Encrypted provider API keys (AES-256-GCM) |
-| `~/.gnito/.gnito-master-key` | Vault master key (mode 0600) — see `docs/security.md` |
+| `~/.gnito/gnito.db` | SQLite database containing chats, projects, memory, automations, settings, and tool runs |
+| `~/.gnito/secrets.enc` | Encrypted provider API keys and plugin secrets |
+| `~/.gnito/.gnito-master-key` | Vault master key, normally mode `0600` |
 | `~/.gnito/backups/` | Encrypted backup archives |
-| `~/.gnito/sandbox-workspace/` | Persistent files available to Docker terminal runs (1 GiB monitored cap) |
-| `~/.gnito/generated-media/` | Locally stored provider-generated PNGs (1 GiB aggregate cap; remove files here to free space) |
+| `~/.gnito/sandbox-workspace/` | Files available to Docker terminal runs, with a monitored cap |
+| `~/.gnito/generated-media/` | Locally stored generated images and other media |
 
-## Security
+## GitHub plugin
 
-- Binds to loopback (`127.0.0.1`) by default.
-- Network deployments require an exact `GNITO_TRUSTED_ORIGINS` allowlist; this is not user authentication.
-- Session-token + CSRF protection on all API routes.
-- Path traversal and symlink escape blocked at every file route.
-- Provider keys never logged or exposed to the client.
-- GitHub PATs are encrypted in the local vault and never exposed to the model;
-  GitHub scopes and fine-grained repository permissions remain authoritative.
-- Memory is opt-in, locally stored, user-editable, and excluded from Incognito
-  sessions. The AI is instructed not to store credentials or highly sensitive data.
-- Terminal runs only in a restricted Docker container; only the dedicated
-  sandbox workspace is mounted, container networking is disabled unless enabled
-  per message, and Gnito must run as a non-root OS user. The workspace has a
-  1 GiB monitored cap with 512 MiB disk headroom. Docker and the host kernel remain part of the
-  security boundary.
-- See `docs/security.md` for the full threat model.
+Open **Plugins → GitHub**, create a narrowly scoped personal access token, and connect it. The token is encrypted locally and is never exposed to the model. GitHub continues to enforce the token’s scopes and fine-grained repository permissions. Review write and destructive operations before running them.
+
+## Security model
+
+- The server binds to loopback (`127.0.0.1`) by default.
+- Network deployments require an exact `GNITO_TRUSTED_ORIGINS` allowlist; this is not a replacement for user authentication.
+- API routes use session-token and CSRF protections.
+- Provider keys and GitHub tokens are never logged or returned to the client.
+- File operations enforce approved-folder permissions and prevent path traversal/symlink escape.
+- Terminal runs require Docker, use a non-root OS user, and mount only the dedicated sandbox workspace.
+- Container networking is disabled unless explicitly allowed per message.
+- Memory is opt-in and never persists from Incognito sessions.
+
+See [`docs/security.md`](docs/security.md) for the full threat model and operational notes.
 
 ## Documentation
 
-- `docs/architecture.md` — system design and module layout
-- `docs/security.md` — threat model and security notes
-- `docs/terminal-sandbox.md` — Docker setup, sandbox limits and image updates
-- `docs/design-system.md` — tokens, themes, accessibility
-- `docs/plugin-sdk.md` — writing your own plugin
-- `docs/implementation-status.md` — what's complete vs. partial
-- `CONTRIBUTING.md` — how to contribute
+- [`docs/architecture.md`](docs/architecture.md) — system design and module layout
+- [`docs/security.md`](docs/security.md) — threat model and security notes
+- [`docs/terminal-sandbox.md`](docs/terminal-sandbox.md) — Docker setup and sandbox limits
+- [`docs/design-system.md`](docs/design-system.md) — tokens, themes, and accessibility
+- [`docs/plugin-sdk.md`](docs/plugin-sdk.md) — writing a plugin
+- [`docs/implementation-status.md`](docs/implementation-status.md) — complete and partial features
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution workflow
+
+## Contributing
+
+Changes should preserve the existing backend contracts, security boundaries, and user workflows. Frontend redesigns may replace the presentation and composition, but should continue to use the existing APIs and real feature handlers rather than mock interactions.
+
+Run the full validation suite before opening a pull request:
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
