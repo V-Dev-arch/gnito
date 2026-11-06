@@ -11,15 +11,31 @@ The current frontend direction is **NEXUS**: a futuristic but practical develope
 
 ## Preview
 
-### NEXUS command deck
+### Chat workspace
 
-![Gnito NEXUS command deck](docs/screenshots/gnito-nexus-desktop.png)
+![Gnito NEXUS chat workspace](docs/screenshots/gnito-nexus-chat.png)
 
-### NEXUS cyan workspace
+### Terminal
 
-![Gnito NEXUS workspace](docs/screenshots/gnito-nexus-command-deck.png)
+![Gnito NEXUS terminal workspace](docs/screenshots/gnito-nexus-terminal.png)
 
-The screenshots show the first-run workspace. After a provider is configured, the same canvas becomes the full conversation and developer command surface.
+### Files
+
+![Gnito NEXUS files workspace](docs/screenshots/gnito-nexus-files.png)
+
+### Projects
+
+![Gnito NEXUS projects workspace](docs/screenshots/gnito-nexus-projects.png)
+
+### Automation Center
+
+![Gnito NEXUS Automation Center](docs/screenshots/gnito-nexus-automations.png)
+
+### Settings
+
+![Gnito NEXUS settings workspace](docs/screenshots/gnito-nexus-settings.png)
+
+These previews show six distinct areas of the same local developer environment. The chat preview is shown before a provider is configured; after setup, the canvas becomes the full conversation and developer command surface.
 
 ## Why Gnito exists
 
