@@ -1,19 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { MessageSquare, Folder, FileText, Terminal, Zap, Plug, Settings, Search, Sun, Moon, Monitor, Menu, X, ShieldAlert, EyeOff, MessagesSquare, CalendarClock } from 'lucide-react';
+import { Activity, CalendarClock, Command, EyeOff, FileText, Folder, LayoutPanelTop, Menu, MessagesSquare, Moon, PanelLeftClose, PanelLeftOpen, Plug, Search, Settings, SlidersHorizontal, Sun, Terminal, X, Zap } from 'lucide-react';
 import { api } from '../lib/api';
 import { MyChatsDialog } from '../features/chat/MyChatsDialog';
 
-interface Props {
-  children: React.ReactNode;
-  theme: 'dark' | 'light' | 'system';
-  setTheme: (t: 'dark' | 'light' | 'system') => void;
-  onOpenPalette: () => void;
-  incognito?: boolean;
-}
+interface Props { children: React.ReactNode; theme: 'dark' | 'light' | 'system'; setTheme: (t: 'dark' | 'light' | 'system') => void; onOpenPalette: () => void; incognito?: boolean }
 
-const NAV = [
-  { to: '/', label: 'New Chat', icon: MessageSquare },
+type NavItem = { to: string; label: string; icon: React.ComponentType<any> };
+const NAV: NavItem[] = [
+  { to: '/', label: 'New Chat', icon: Command },
   { to: '/incognito', label: 'Incognito', icon: EyeOff },
   { to: '/projects', label: 'Projects', icon: Folder },
   { to: '/files', label: 'Files', icon: FileText },
@@ -25,224 +20,86 @@ const NAV = [
 
 export function AppShell({ children, theme, setTheme, onOpenPalette, incognito }: Props) {
   const [location, setLocation] = useLocation();
-  const [myChatsOpen, setMyChatsOpen] = useState(false);
-  const [scheduledTasksOpen, setScheduledTasksOpen] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(() => window.localStorage.getItem('gnito-rail-collapsed') === '1');
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [myChatsOpen, setMyChatsOpen] = useState(false);
+  const [scheduledOpen, setScheduledOpen] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<'checking' | 'online' | 'offline'>('checking');
-  const sidebarRef = useRef<HTMLElement>(null);
-  const mainRef = useRef<HTMLElement>(null);
-  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const myChatsButtonRef = useRef<HTMLButtonElement>(null);
-  const scheduledTasksButtonRef = useRef<HTMLButtonElement>(null);
-  const previousLocationRef = useRef(location);
-  const mobileOpenRef = useRef(mobileOpen);
-  mobileOpenRef.current = mobileOpen;
-  const openMobileMenu = useCallback(() => {
-    setMobileOpen(true);
-    window.requestAnimationFrame(() => sidebarRef.current?.querySelector<HTMLElement>('a[href], button:not(:disabled)')?.focus());
+  const drawerRef = useRef<HTMLElement>(null);
+  const mobileButtonRef = useRef<HTMLButtonElement>(null);
+  const myChatsRef = useRef<HTMLButtonElement>(null);
+  const scheduledRef = useRef<HTMLButtonElement>(null);
+
+  const pageTitle = location.startsWith('/incognito') ? 'Incognito' : location.startsWith('/chats') ? 'Conversation' : NAV.find(item => item.to !== '/' && location.startsWith(item.to))?.label || 'Command deck';
+  const chatId = location.startsWith('/chats/') ? location.slice('/chats/'.length).split('/')[0] : undefined;
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    window.requestAnimationFrame(() => mobileButtonRef.current?.focus());
   }, []);
-  const closeMobileMenu = useCallback(() => {
-    setMobileOpen(false);
-    window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+  const openDrawer = useCallback(() => {
+    setDrawerOpen(true);
+    window.requestAnimationFrame(() => drawerRef.current?.querySelector<HTMLElement>('a[href],button:not(:disabled)')?.focus());
   }, []);
-  const closeMyChats = useCallback(() => {
-    setMyChatsOpen(false);
-    window.requestAnimationFrame(() => (isMobile ? mobileMenuButtonRef.current : myChatsButtonRef.current)?.focus());
-  }, [isMobile]);
-  const closeScheduledTasks = useCallback(() => {
-    setScheduledTasksOpen(false);
-    window.requestAnimationFrame(() => (isMobile ? mobileMenuButtonRef.current : scheduledTasksButtonRef.current)?.focus());
-  }, [isMobile]);
-  const trapMobileFocus = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
-    if (!isMobile || !mobileOpen || event.key !== 'Tab') return;
-    const selector = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
-    const focusable = Array.from(sidebarRef.current?.querySelectorAll<HTMLElement>(selector) || [])
-      .filter(element => element.getClientRects().length > 0 && element.tabIndex >= 0);
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  }, [isMobile, mobileOpen]);
+
   useEffect(() => {
-    const sidebar = sidebarRef.current;
-    const main = mainRef.current;
-    if (isMobile && !mobileOpen) sidebar?.setAttribute('inert', '');
-    else sidebar?.removeAttribute('inert');
-    if (isMobile && mobileOpen) main?.setAttribute('inert', '');
-    else main?.removeAttribute('inert');
-  }, [isMobile, mobileOpen]);
-  useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth <= 768);
-    check();
-    window.addEventListener('resize', check);
-    return () => window.removeEventListener('resize', check);
+    const resize = () => setIsMobile(window.innerWidth <= 820);
+    resize(); window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
   }, []);
+  useEffect(() => { window.localStorage.setItem('gnito-rail-collapsed', railCollapsed ? '1' : '0'); }, [railCollapsed]);
   useEffect(() => {
     let alive = true;
-    api.get('/api/health').then(() => { if (alive) setRuntimeStatus('online'); }).catch(() => { if (alive) setRuntimeStatus('offline'); });
+    api.get('/api/health').then(() => alive && setRuntimeStatus('online')).catch(() => alive && setRuntimeStatus('offline'));
     return () => { alive = false; };
   }, [location]);
   useEffect(() => {
-    if (previousLocationRef.current === location) return;
-    previousLocationRef.current = location;
-    if (mobileOpenRef.current) closeMobileMenu();
-  }, [location, closeMobileMenu]);
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && mobileOpen) closeMobileMenu(); };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [mobileOpen, closeMobileMenu]);
+    const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') { setDrawerOpen(false); setInspectorOpen(false); } };
+    const onDialog = (event: Event) => { const mode = (event as CustomEvent<'chats' | 'scheduled'>).detail; if (mode === 'chats') setMyChatsOpen(true); if (mode === 'scheduled') setScheduledOpen(true); };
+    window.addEventListener('keydown', onEscape); window.addEventListener('gnito:open-dialog', onDialog);
+    return () => { window.removeEventListener('keydown', onEscape); window.removeEventListener('gnito:open-dialog', onDialog); };
+  }, []);
+  useEffect(() => { if (isMobile && drawerOpen) document.body.dataset.drawerOpen = '1'; else delete document.body.dataset.drawerOpen; }, [isMobile, drawerOpen]);
 
-  const shellClass = [
-    'app-shell',
-    isMobile ? 'mobile' : '',
-  ].filter(Boolean).join(' ');
+  const active = (to: string) => to === '/' ? location === '/' : location.startsWith(to);
+  const actualTheme = theme === 'light' ? 'light' : 'dark';
 
-  const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
-  const pageTitle = location.startsWith('/incognito') ? 'Incognito chat' : location.startsWith('/chats') ? 'Chat' : NAV.find(n => n.to !== '/' && location.startsWith(n.to))?.label || 'Gnito';
-  const currentChatId = location.startsWith('/chats/') ? location.slice('/chats/'.length).split('/')[0] : undefined;
+  return <div className={`nexus-shell ${railCollapsed && !isMobile ? 'rail-collapsed' : ''} ${inspectorOpen && !isMobile ? 'inspector-open' : ''}`}>
+    <aside className="nexus-rail" aria-label="Gnito navigation rail">
+      <Link href="/" className="nexus-brand" aria-label="Gnito command deck"><span className="nexus-brand-g">G</span><span className="nexus-brand-name">gnito</span></Link>
+      <div className="nexus-rail-group">
+        {NAV.map(({ to, label, icon: Icon }) => <Link key={to} href={to} className={`nexus-rail-button ${active(to) ? 'active' : ''}`} aria-label={label} aria-current={active(to) ? 'page' : undefined} data-testid={`link-rail-${to.replace(/\//g, '-') || 'home'}`}><Icon size={17} strokeWidth={1.7} /><span>{label}</span></Link>)}
+        <button className="nexus-rail-button" onClick={() => setMyChatsOpen(true)} ref={myChatsRef} aria-label="My Chats" data-testid="button-my-chats"><MessagesSquare size={17} strokeWidth={1.7} /><span>My Chats</span></button>
+        <button className="nexus-rail-button" onClick={() => setScheduledOpen(true)} ref={scheduledRef} aria-label="Scheduled Tasks" data-testid="button-scheduled-tasks"><CalendarClock size={17} strokeWidth={1.7} /><span>Scheduled Tasks</span></button>
+      </div>
+      <div className="nexus-rail-bottom">
+        <button className="nexus-rail-button" onClick={() => setInspectorOpen(value => !value)} aria-label="Toggle inspector" aria-pressed={inspectorOpen} data-testid="button-context-panel"><SlidersHorizontal size={17} strokeWidth={1.7} /><span>Inspector</span></button>
+        <button className="nexus-rail-button" onClick={() => setTheme(actualTheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle theme" data-testid="button-theme-toggle">{actualTheme === 'dark' ? <Moon size={17} strokeWidth={1.7} /> : <Sun size={17} strokeWidth={1.7} />}<span>Theme</span></button>
+        <div className="nexus-status" title={runtimeStatus}><span className={`nexus-status-dot ${runtimeStatus}`} /><span>{runtimeStatus === 'online' ? 'ONLINE' : runtimeStatus === 'offline' ? 'OFFLINE' : 'SYNC'}</span></div>
+        <button className="nexus-collapse" onClick={() => setRailCollapsed(value => !value)} aria-label={railCollapsed ? 'Expand navigation' : 'Collapse navigation'} data-testid="button-sidebar-collapse">{railCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
+      </div>
+    </aside>
 
-  return (
-    <div className={shellClass}>
-      <aside
-        ref={sidebarRef}
-        id="primary-navigation"
-        className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`}
-        aria-label="Main navigation"
-        aria-hidden={isMobile && !mobileOpen}
-        onKeyDown={trapMobileFocus}
-      >
-        <div className="sidebar-header">
-          <Link href="/" className="sidebar-logo" aria-label="Gnito home">
-            <img src="/brand/logo-mono.svg" alt="" width={28} height={28} style={{ color: 'currentColor' }} />
-            <span className="sidebar-label" style={{ display: 'flex', flexDirection: 'column' }}>
-              <span className="sidebar-wordmark">Gnito</span>
-              <span className="sidebar-tagline">Your AI. Your Machine. Your Rules.</span>
-            </span>
-          </Link>
-          {isMobile && <button
-            className="btn btn-ghost btn-icon"
-            onClick={closeMobileMenu}
-            aria-label="Close menu"
-            aria-expanded={mobileOpen}
-            aria-controls="primary-navigation"
-            data-testid="button-sidebar-toggle"
-          >
-            <X size={18} />
-          </button>}
-        </div>
+    <aside className={`nexus-drawer ${drawerOpen ? 'open' : ''}`} ref={drawerRef} aria-label="Workspace navigation" aria-hidden={isMobile && !drawerOpen}>
+      <div className="nexus-drawer-header"><div><div className="nexus-overline">GNITO / NEXUS</div><strong>{pageTitle}</strong></div>{isMobile && <button className="nexus-icon-button" onClick={closeDrawer} aria-label="Close navigation"><X size={17} /></button>}</div>
+      <button className="nexus-command-trigger" onClick={onOpenPalette} data-testid="button-command-palette"><Search size={15} /><span>Search commands</span><kbd>⌘ K</kbd></button>
+      <div className="nexus-drawer-section"><div className="nexus-drawer-label">Active workspace</div><div className="nexus-workspace-card"><Activity size={15} /><div><strong>Local node</strong><span>Personal developer OS</span></div><span className="nexus-live-dot" /></div></div>
+      <div className="nexus-drawer-section nexus-recents"><div className="nexus-drawer-label">Navigation</div><div className="nexus-drawer-links">{NAV.map(({ to, label, icon: Icon }) => <Link key={to} href={to} className={`nexus-drawer-link ${active(to) ? 'active' : ''}`} data-testid={`link-drawer-${to.replace(/\//g, '-') || 'home'}`}><Icon size={15} /><span>{label}</span></Link>)}<button className="nexus-drawer-link" onClick={() => setMyChatsOpen(true)}><MessagesSquare size={15} /><span>My Chats</span></button><button className="nexus-drawer-link" onClick={() => setScheduledOpen(true)}><CalendarClock size={15} /><span>Scheduled Tasks</span></button></div></div>
+      <div className="nexus-drawer-footer"><span>Workspace {runtimeStatus}</span><span className="nexus-footer-key">LOCAL / BYOK</span></div>
+    </aside>
 
-        <div className="sidebar-section">
-          <button
-            className="btn btn-secondary"
-            onClick={onOpenPalette}
-            style={{ width: '100%', justifyContent: 'flex-start' }}
-            data-testid="button-command-palette"
-          >
-            <Search size={16} />
-            <span className="sidebar-label">Search…</span>
-          </button>
-        </div>
+    {isMobile && drawerOpen && <button className="nexus-backdrop" onClick={closeDrawer} aria-label="Close navigation" />}
+    <main className="nexus-canvas">
+      <header className="nexus-topbar"><div className="nexus-topbar-left"><button className="nexus-mobile-menu" ref={mobileButtonRef} onClick={openDrawer} aria-label="Open navigation"><Menu size={18} /></button><div className="nexus-breadcrumb"><span>NODE / 01</span><i>/</i><strong>{pageTitle}</strong></div></div><div className="nexus-topbar-actions"><span className="nexus-system-readout"><span className="nexus-live-dot" /> {incognito ? 'PRIVATE SESSION' : 'SYSTEM NOMINAL'}</span><button className="nexus-topbar-command" onClick={onOpenPalette}><Command size={14} /><span>Command center</span><kbd>⌘ K</kbd></button></div></header>
+      {incognito && <div className="nexus-incognito-banner"><EyeOff size={14} /><span>Incognito channel active. Messages will not be saved to local history.</span></div>}
+      <div className="nexus-content">{children}</div>
+    </main>
 
-        <nav className="sidebar-section">
-          <div className="sidebar-section-title sidebar-label">Workspace</div>
-          <div className="sidebar-nav">
-            {NAV.map(({ to, label, icon: Icon }) => {
-              const active = to === '/' ? location === '/' : location.startsWith(to);
-              return (
-                <Link
-                  key={to}
-                  href={to}
-                  className={`sidebar-link ${active ? 'active' : ''}`}
-                  aria-current={active ? 'page' : undefined}
-                  onClick={() => { if (isMobile) closeMobileMenu(); }}
-                  data-testid={`link-${to.replace(/\//g, '-') || 'home'}`}
-                >
-                  <Icon size={18} />
-                  <span className="sidebar-label">{label}</span>
-                </Link>
-              );
-            })}
-            <button ref={myChatsButtonRef} className="sidebar-link" onClick={() => { setMyChatsOpen(true); if (isMobile) closeMobileMenu(); }} data-testid="button-my-chats">
-              <MessagesSquare size={18} /><span className="sidebar-label">My Chats</span>
-            </button>
-            <button ref={scheduledTasksButtonRef} className="sidebar-link" onClick={() => { setScheduledTasksOpen(true); if (isMobile) closeMobileMenu(); }} data-testid="button-scheduled-tasks">
-              <CalendarClock size={18} /><span className="sidebar-label">Scheduled Tasks</span>
-            </button>
-          </div>
-        </nav>
+    {inspectorOpen && !isMobile && <aside className="nexus-inspector" aria-label="Context inspector"><div className="nexus-inspector-head"><div><div className="nexus-overline">CONTEXT / LIVE</div><h2>{pageTitle}</h2></div><button className="nexus-icon-button" onClick={() => setInspectorOpen(false)} aria-label="Close inspector"><X size={16} /></button></div><div className="nexus-inspector-block"><span className="nexus-drawer-label">Runtime</span><strong><span className="nexus-live-dot" /> {runtimeStatus === 'online' ? 'Workspace online' : 'Checking workspace'}</strong><p>Local APIs, storage and provider configuration are available to the current session.</p></div><div className="nexus-inspector-block"><span className="nexus-drawer-label">Control surface</span><div className="nexus-inspector-row"><span>Command center</span><kbd>⌘ K</kbd></div><div className="nexus-inspector-row"><span>Navigation</span><span>Rail + drawer</span></div><div className="nexus-inspector-row"><span>Theme</span><span>{actualTheme}</span></div></div><div className="nexus-inspector-scan"><LayoutPanelTop size={15} /><span>Inspector is optional. Close it for a clean canvas.</span></div></aside>}
 
-        <div className="sidebar-footer">
-          <div className="sidebar-env-status">
-            <span className={`status-dot ${incognito ? 'warn' : runtimeStatus}`} aria-hidden />
-            <span className="sidebar-label" role="status" aria-live="polite">
-              {incognito ? 'Incognito active' : runtimeStatus === 'online' ? 'Workspace online' : runtimeStatus === 'offline' ? 'Workspace offline' : 'Checking workspace…'}
-            </span>
-          </div>
-          <div className="sidebar-env-status">
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-              data-testid="button-theme-toggle"
-              style={{ gap: 6, padding: '4px 8px' }}
-            >
-              <ThemeIcon size={14} />
-              <span className="sidebar-label">{theme === 'dark' ? 'Dark' : 'Light'}</span>
-            </button>
-          </div>
-        </div>
-      </aside>
-
-      {isMobile && mobileOpen && (
-        <button className="sidebar-backdrop" onClick={closeMobileMenu} aria-label="Close navigation" />
-      )}
-
-      <main
-        className="app-main"
-        ref={mainRef}
-        style={{ minHeight: 0, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', flex: 1 }}
-        aria-hidden={isMobile && mobileOpen}
-      >
-        {isMobile && !mobileOpen && (
-          <header className="mobile-topbar" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--color-divider)' }}>
-            <button
-              className="btn btn-ghost btn-icon"
-              ref={mobileMenuButtonRef}
-              onClick={openMobileMenu}
-              aria-label="Open navigation"
-              aria-expanded={mobileOpen}
-              aria-controls="primary-navigation"
-              data-testid="button-mobile-menu"
-            >
-              <Menu size={18} />
-            </button>
-            <span style={{ fontWeight: 700 }}>{pageTitle}</span>
-          </header>
-        )}
-        {incognito && (
-          <div className="incognito-banner" role="status">
-            <ShieldAlert size={16} />
-            <span><strong>Incognito Mode</strong> — messages will not be saved to history. External providers may still process what you send.</span>
-          </div>
-        )}
-        {children}
-      </main>
-      <MyChatsDialog
-        open={myChatsOpen}
-        currentChatId={currentChatId}
-        onClose={closeMyChats}
-        onDeleted={chatId => { if (currentChatId === chatId) setLocation('/'); }}
-      />
-      <MyChatsDialog
-        open={scheduledTasksOpen}
-        mode="scheduled"
-        currentChatId={currentChatId}
-        onClose={closeScheduledTasks}
-        onDeleted={chatId => { if (currentChatId === chatId) setLocation('/'); }}
-      />
-    </div>
-  );
+    <MyChatsDialog open={myChatsOpen} currentChatId={chatId} onClose={() => { setMyChatsOpen(false); window.requestAnimationFrame(() => myChatsRef.current?.focus()); }} onDeleted={id => { if (chatId === id) setLocation('/'); }} />
+    <MyChatsDialog open={scheduledOpen} mode="scheduled" currentChatId={chatId} onClose={() => { setScheduledOpen(false); window.requestAnimationFrame(() => scheduledRef.current?.focus()); }} onDeleted={id => { if (chatId === id) setLocation('/'); }} />
+  </div>;
 }

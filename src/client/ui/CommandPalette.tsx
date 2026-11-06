@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
-import { MessageSquare, Folder, Zap, Plug, Settings, FileText, ArrowRight } from 'lucide-react';
+import { MessageSquare, Folder, Zap, Plug, Settings, FileText, ArrowRight, Terminal, EyeOff, CalendarClock, MessagesSquare } from 'lucide-react';
 
 type IconComponent = React.ComponentType<{ size?: number | string; className?: string; }>;
 
@@ -22,12 +22,15 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   const commands = useMemo<CommandItem[]>(() => [
     { id: 'nav-home', label: 'New chat', kind: 'navigate', to: '/', icon: MessageSquare },
+    { id: 'nav-incognito', label: 'Start Incognito Chat', kind: 'navigate', to: '/incognito', icon: EyeOff },
+    { id: 'dialog-my-chats', label: 'Open My Chats', kind: 'action', run: () => window.dispatchEvent(new CustomEvent('gnito:open-dialog', { detail: 'chats' })), icon: MessagesSquare },
+    { id: 'dialog-scheduled', label: 'Open Scheduled Tasks', kind: 'action', run: () => window.dispatchEvent(new CustomEvent('gnito:open-dialog', { detail: 'scheduled' })), icon: CalendarClock },
     { id: 'nav-projects', label: 'Projects', kind: 'navigate', to: '/projects', icon: Folder },
     { id: 'nav-files', label: 'Files', kind: 'navigate', to: '/files', icon: FileText },
+    { id: 'nav-terminal', label: 'Terminal', kind: 'navigate', to: '/terminal', icon: Terminal },
     { id: 'nav-automations', label: 'Automation Center', kind: 'navigate', to: '/automations', icon: Zap },
     { id: 'nav-plugins', label: 'Plugins', kind: 'navigate', to: '/plugins', icon: Plug },
     { id: 'nav-settings', label: 'Settings', kind: 'navigate', to: '/settings', icon: Settings },
-    { id: 'nav-incognito', label: 'Start Incognito Chat', kind: 'navigate', to: '/incognito', icon: MessageSquare },
   ], []);
 
   const filtered = useMemo(() => {

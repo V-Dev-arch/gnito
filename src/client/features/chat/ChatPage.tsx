@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { Copy, Download, FileText, Globe, ImagePlus, Paperclip, Plus, RefreshCw, Send, Square, Terminal, Wifi, X } from 'lucide-react';
+import { ArrowUpRight, Copy, Download, FileText, Globe, ImagePlus, Paperclip, Plus, RefreshCw, Send, Square, Terminal, Wifi, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ModelInfo } from '../../../shared/types.js';
@@ -600,16 +600,25 @@ export function ChatPage({ chatId, projectId }: Props) {
           <Link href="/" className="btn btn-secondary btn-sm" data-testid="button-new-chat"><Plus size={15} /> New chat</Link>
         </div>
 
-        {needsSetup && <div className="card" style={{ marginBottom: 16 }} data-testid="setup-card">
-          <div className="card-title">Connect a model provider</div>
-          <div className="card-description">Gnito connects directly to your provider using your own API key. Keys are encrypted locally and are never sent to the browser.</div>
-          <Link href="/settings" className="btn btn-primary" data-testid="button-setup-provider">Add a provider</Link>
-        </div>}
+        {needsSetup && <section className="provider-setup-panel" data-testid="setup-card">
+          <div className="setup-kicker"><span className="status-dot warn" /> Setup required</div>
+          <div className="setup-panel-content">
+            <div><h2>Connect your first model</h2><p>Gnito connects directly to your provider using your own API key. Keys are encrypted locally and never sent to the browser.</p></div>
+            <Link href="/settings" className="btn btn-primary" data-testid="button-setup-provider">Add a provider <ArrowUpRight size={14} /></Link>
+          </div>
+          <div className="setup-panel-footer"><span>BYOK · encrypted locally</span><span>Provider settings →</span></div>
+        </section>}
 
-        {messages.length === 0 && !needsSetup && <div className="empty-state">
-          <img src="/brand/logo-mono.svg" alt="" width={44} height={44} />
-          <div className="empty-state-title">What would you like to work on?</div>
-          <div className="empty-state-text">Your conversations stay in your local workspace. Choose a provider and model below.</div>
+        {messages.length === 0 && !needsSetup && <div className="workspace-launchpad">
+          <div className="launchpad-kicker"><span className="launchpad-mark">G</span><span>Private AI workspace</span><span className="launchpad-rule" /></div>
+          <div className="empty-state-title">Build something thoughtful.</div>
+          <div className="empty-state-text">Ask Gnito to reason through a problem, inspect a file, or help you ship. Your keys and conversations stay in this workspace.</div>
+          <div className="launchpad-status-grid">
+            <div><span className="launchpad-label">Workspace</span><strong>Local-first</strong><small>Data stays on this machine</small></div>
+            <div><span className="launchpad-label">Connected models</span><strong>{enabledProviders.length || '0'}</strong><small>{enabledProviders.length ? 'Ready to assist' : 'Add a provider to begin'}</small></div>
+            <div><span className="launchpad-label">Context</span><strong>On demand</strong><small>Files, tools and web search</small></div>
+          </div>
+          <div className="launchpad-section-heading"><span>Start with a direction</span><span className="launchpad-shortcut">⌘ K for commands</span></div>
           <div className="empty-state-actions">{[
             { title: 'Explain a concept', desc: 'Get a clear explanation, at any level' },
             { title: 'Summarize a file', desc: 'Work with files in folders you have approved' },
@@ -620,7 +629,7 @@ export function ChatPage({ chatId, projectId }: Props) {
             if (s.title === 'Search the web') { setSearchWeb(true); setInput('Search the web for current information about…'); }
             else if (s.title === 'Make a video with OpenMontage') setInput('With terminal and network access enabled, clone https://github.com/calesthio/OpenMontage into /workspace/OpenMontage, follow its README to create a short video, and save the finished file under /workspace/output/gnito-video.mp4. Return a preview and download link using /api/terminal/media?path=%2Fworkspace%2Foutput%2Fgnito-video.mp4. Ask me before using any paid service or external account.');
             else setInput(s.title);
-          }}><span className="suggestion-title">{s.title}</span><span className="suggestion-desc">{s.desc}</span></button>)}</div>
+          }}><span className="suggestion-index">{String((['Explain a concept', 'Summarize a file', 'Search the web', 'Create an automation', 'Make a video with OpenMontage'].indexOf(s.title) + 1)).padStart(2, '0')}</span><span><span className="suggestion-title">{s.title}</span><span className="suggestion-desc">{s.desc}</span></span><ArrowUpRight size={14} /></button>)}</div>
         </div>}
 
         <div className="chat-messages" data-testid="chat-messages">
