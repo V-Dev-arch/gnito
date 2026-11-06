@@ -25,6 +25,25 @@ const UpsertMemoryInput = z.object({
   reason: z.string().max(500).default(''),
 });
 
+export async function executeMemoryRead(): Promise<{ output?: any; error?: string }> {
+  if (getSetting('memory.enabled', 'false') !== 'true') return { error: 'Memory is disabled. Ask the user to enable Memory in Settings.' };
+  const rows = db.prepare('SELECT key, value, reason, updated_at FROM memory_entries ORDER BY updated_at DESC LIMIT 200').all() as any[];
+  return { output: rows.map(row => ({ key: row.key, value: row.value, reason: row.reason, updatedAt: row.updated_at })) };
+}
+
+export async function executeMemoryWrite(input: unknown, options: { incognito?: boolean } = {}): Promise<{ output?: any; error?: string }> {
+  if (options.incognito) return { error: 'Memory is disabled in Incognito Mode.' };
+  if (getSetting('memory.enabled', 'false') !== 'true') return { error: 'Memory is disabled. Ask the user to enable Memory in Settings.' };
+  const parsed = UpsertMemoryInput.safeParse(input);
+  if (!parsed.success) return { error: 'Memory key, value, or reason is invalid.' };
+  const existing = db.prepare('SELECT id, created_at FROM memory_entries WHERE key = ?').get(parsed.data.key) as any;
+  const id = existing?.id || randomUUID();
+  const now = Date.now();
+  db.prepare(`INSERT OR REPLACE INTO memory_entries (id, key, value, reason, created_at, updated_at) VALUES (?,?,?,?,?,?)`)
+    .run(id, parsed.data.key, parsed.data.value, parsed.data.reason, existing?.created_at || now, now);
+  return { output: { id, key: parsed.data.key, value: parsed.data.value, saved: true } };
+}
+
 export function registerMemoryRoutes(app: any): void {
   // Memory enabled/disabled setting (default off).
   app.get('/api/memory/enabled', (_req: Request, res: Response) => {
@@ -65,6 +84,8 @@ export function registerMemoryRoutes(app: any): void {
   });
 
   app.put('/api/memory/:id', (req: Request, res: Response) => {
+    if (req.header('x-gnito-incognito') === '1') { res.status(403).json({ error: 'incognito', message: 'Memory is disabled in Incognito Mode.' }); return; }
+    if (getSetting('memory.enabled', 'false') !== 'true') { res.status(400).json({ error: 'memory-disabled', message: 'Enable memory first in Settings.' }); return; }
     const parsed = UpsertMemoryInput.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: 'validation' }); return; }
     const existing = db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(req.params.id) as any;
@@ -75,11 +96,13 @@ export function registerMemoryRoutes(app: any): void {
   });
 
   app.delete('/api/memory/:id', (req: Request, res: Response) => {
+    if (req.header('x-gnito-incognito') === '1') { res.status(403).json({ error: 'incognito', message: 'Memory is disabled in Incognito Mode.' }); return; }
     const info = db.prepare('DELETE FROM memory_entries WHERE id = ?').run(req.params.id);
     res.json({ ok: info.changes > 0 });
   });
 
-  app.delete('/api/memory', (_req: Request, res: Response) => {
+  app.delete('/api/memory', (req: Request, res: Response) => {
+    if (req.header('x-gnito-incognito') === '1') { res.status(403).json({ error: 'incognito', message: 'Memory is disabled in Incognito Mode.' }); return; }
     db.prepare('DELETE FROM memory_entries').run();
     res.json({ ok: true });
   });

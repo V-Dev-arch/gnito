@@ -81,6 +81,17 @@ beforeAll(async () => {
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Scheduled result confirmed.' } }] }));
       return;
     }
+    if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Remember that I prefer concise answers.')) {
+      const memoryTool = body.tools?.some((tool: any) => tool.function?.name === 'memory_write');
+      if (memoryTool && !body.messages.some((message: any) => message.role === 'tool')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'memory-write-1', type: 'function', function: { name: 'memory_write', arguments: JSON.stringify({ key: 'answer_style', value: 'Concise answers', reason: 'User explicitly asked to remember this preference.' }) } }] } }] }));
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Saved your preference to memory.' } }] }));
+      }
+      return;
+    }
     if (Array.isArray(body.messages) && body.messages.some((message: any) => message.role === 'user' && message.content === 'Tool incompatible scheduled task')) {
       if (body.tools?.length) {
         res.writeHead(503, { 'content-type': 'application/json' });
@@ -314,6 +325,19 @@ describe('autonomous terminal tool loop', () => {
     expect(detail.messages.map((message: any) => message.content)).toEqual(['Scheduled task test', 'Scheduled result confirmed.']);
     const normalChats = await nativeFetch(`${baseUrl}/api/chats`, { headers: apiHeaders() }).then(response => response.json());
     expect(normalChats.some((chat: any) => chat.id === scheduledChats[0].id)).toBe(false);
+  });
+
+  it('lets the AI save memory when the user asks it to remember a preference', async () => {
+    await nativeFetch(`${baseUrl}/api/memory/enabled`, { method: 'PUT', headers: apiHeaders(true), body: JSON.stringify({ enabled: true }) });
+    const providerId = await createProvider({ kind: 'custom', label: 'Memory provider', baseUrl: openAiUrl, apiKey: 'memory-key', enabled: true });
+    const response = await sendChat(providerId, {
+      model: 'mock-model', chatId: 'autonomous-agent-chat', allowMemory: true,
+      messages: [{ role: 'user', content: 'Remember that I prefer concise answers.' }],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Saved your preference to memory.');
+    const memory = await nativeFetch(`${baseUrl}/api/memory`, { headers: apiHeaders() }).then(result => result.json());
+    expect(memory).toEqual(expect.arrayContaining([expect.objectContaining({ key: 'answer_style', value: 'Concise answers' })]));
   });
 
   it('falls back when a provider returns 503 for tool-enabled automation requests', async () => {

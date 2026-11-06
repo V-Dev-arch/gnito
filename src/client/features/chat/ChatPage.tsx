@@ -236,6 +236,7 @@ export function ChatPage({ chatId, projectId }: Props) {
   const [chatInfo, setChatInfo] = useState<Chat | null>(null);
   const [activeChatId, setActiveChatId] = useState(chatId || '');
   const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const [memoryEnabled, setMemoryEnabled] = useState(false);
   const streamedTextRef = useRef('');
   const abortRef = useRef<AbortController | null>(null);
   const activeToolRunRef = useRef<string | null>(null);
@@ -318,7 +319,9 @@ export function ChatPage({ chatId, projectId }: Props) {
   useEffect(() => {
     let alive = true;
     api.get('/api/memory/enabled').then(async ({ enabled }: { enabled: boolean }) => {
-      if (!enabled) return;
+      if (alive) setMemoryEnabled(enabled);
+      if (!enabled) { if (alive) setMemoryEntries([]); return; }
+
       const entries = await api.get('/api/memory');
       if (alive) setMemoryEntries(entries as MemoryEntry[]);
     }).catch(() => { /* Memory is optional and remains off if unavailable. */ });
@@ -448,7 +451,7 @@ export function ChatPage({ chatId, projectId }: Props) {
       } catch (e: any) { setError(`Chat saved, but its title could not be updated: ${e.message}`); }
     }
     const memoryPrompt = memoryEntries.length
-      ? `User-approved local memory (use only when relevant; do not expose or rewrite these entries):\n${memoryEntries.map(entry => `- ${entry.key}: ${entry.value}`).join('\n')}`.slice(0, 8_000)
+      ? `User-approved local memory (use only when relevant; do not expose unrelated entries. You may update or add durable preferences through the memory tools when the user asks you to remember something or it is clearly useful):\n${memoryEntries.map(entry => `- ${entry.key}: ${entry.value}`).join('\n')}`.slice(0, 8_000)
       : '';
     const priorMessages = boundedPriorMessages(messages);
     const attachmentParts = filesToSend.flatMap(file => file.kind === 'image'
@@ -468,7 +471,7 @@ export function ChatPage({ chatId, projectId }: Props) {
     setActivity(`Connecting to ${chosenProvider?.label || 'provider'} · ${activeModel}…`);
     abortRef.current = api.streamChat(
       selectedProvider,
-      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider), allowGitHubTools: githubTools },
+      { model: activeModel, messages: requestMessages, stream: true, chatId: cid, allowTerminal: terminalTools, allowNetwork: terminalNetwork, allowImageTools: imageTools && supportsImageTools(chosenProvider), allowGitHubTools: githubTools, allowMemory: memoryEnabled },
       delta => {
         setActivity(`Generating with ${chosenProvider?.label || 'provider'} · ${activeModel}`);
         streamedTextRef.current += delta;
@@ -549,7 +552,7 @@ export function ChatPage({ chatId, projectId }: Props) {
         setPendingMedia(current => [...current, media]);
       },
     );
-  }, [input, attachments, streaming, saving, searching, searchWeb, terminalTools, terminalNetwork, imageTools, githubTools, selectedProvider, activeModel, modelsError, chatId, messages, projectId, setLocation, chosenProvider, memoryEntries]);
+  }, [input, attachments, streaming, saving, searching, searchWeb, terminalTools, terminalNetwork, imageTools, githubTools, selectedProvider, activeModel, modelsError, chatId, messages, projectId, setLocation, chosenProvider, memoryEntries, memoryEnabled]);
 
   const stop = () => {
     abortRef.current?.abort();

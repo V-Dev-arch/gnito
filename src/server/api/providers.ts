@@ -20,6 +20,7 @@ import type { ModelInfo } from '../../shared/types.js';
 import { getDb } from '../db/index.js';
 import { getProviderSecret, setProviderSecret, deleteProviderSecret } from '../security/vault.js';
 import { executeAgentTerminal, executeGitHubTool } from './tools.js';
+import { executeMemoryRead, executeMemoryWrite } from './memory.js';
 import { storeGeneratedPng, storeGeneratedSvg } from './media.js';
 
 const db = getDb();
@@ -205,6 +206,7 @@ export function registerProviderRoutes(app: any): void {
       allowNetwork: z.boolean().default(false),
       allowImageTools: z.boolean().default(false),
       allowGitHubTools: z.boolean().default(false),
+      allowMemory: z.boolean().default(false),
       chatId: z.string().min(1).max(200).optional(),
     });
     const parsed = ChatRequest.safeParse(req.body);
@@ -224,6 +226,10 @@ export function registerProviderRoutes(app: any): void {
     }
     if (body.allowNetwork && !body.allowTerminal) {
       res.status(400).json({ error: 'validation', message: 'Enable terminal access before granting terminal network access.' });
+      return;
+    }
+    if (body.allowMemory && req.header('x-gnito-incognito') === '1') {
+      res.status(403).json({ error: 'incognito', message: 'Memory tools are disabled in Incognito Mode.' });
       return;
     }
     if (body.allowTerminal && row.kind === 'manus-agent') {
@@ -288,12 +294,12 @@ export function registerProviderRoutes(app: any): void {
         ...JSON.parse(row.custom_headers || '{}'),
       };
 
-      if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools) {
+      if (body.allowTerminal || body.allowImageTools || body.allowGitHubTools || body.allowMemory) {
         const referenceImages = extractImageDataUrls(body.messages);
         const imagePrompt = latestUserImagePrompt(body.messages);
         const text = row.kind === 'anthropic-compatible'
-          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, send })
-          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
+          ? await runAnthropicAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId!, allowNetwork: body.allowNetwork, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, allowMemory: body.allowMemory, send })
+          : await runOpenAIAgent({ url, headers, body, signal: abortController.signal, provider: row, apiKey, referenceImages, imagePrompt, chatId: body.chatId || '', allowNetwork: body.allowNetwork, allowTerminal: body.allowTerminal, allowImageTools: body.allowImageTools, allowGitHubTools: body.allowGitHubTools, allowMemory: body.allowMemory, forceImageGeneration: body.allowImageTools && hasExplicitImageRequest(body.messages), send });
         if (text) send('chunk', { delta: text });
         send('end', {});
         res.end();
@@ -559,6 +565,27 @@ const ANTHROPIC_TERMINAL_TOOL = {
   },
 };
 
+const MEMORY_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_read',
+    description: 'Read the user-approved local memory when relevant. Never expose unrelated private memory.',
+    parameters: { type: 'object', properties: {} },
+  },
+};
+const MEMORY_WRITE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_write',
+    description: 'Save a durable user preference, fact, goal, or instruction when the user asks you to remember it or it is clearly useful for future conversations. Use a concise stable key and explain what was saved.',
+    parameters: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' }, reason: { type: 'string' } }, required: ['key', 'value'] },
+  },
+};
+const MEMORY_TOOL_POLICY = 'Local memory tools are available. Read memory only when relevant. Write memory when the user explicitly asks you to remember something, or when a durable preference/fact is clearly useful for future conversations. Never save passwords, API keys, highly sensitive data, or transient details. Confirm saved memory in your response.';
+
+const ANTHROPIC_MEMORY_READ_TOOL = { name: 'memory_read', description: 'Read user-approved local memory when relevant.', input_schema: { type: 'object', properties: {} } };
+const ANTHROPIC_MEMORY_WRITE_TOOL = { name: 'memory_write', description: 'Save a durable preference, fact, goal, or instruction when appropriate. Never save secrets.', input_schema: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' }, reason: { type: 'string' } }, required: ['key', 'value'] } };
+
 const ANTHROPIC_GITHUB_TOOL = {
   name: 'github_api',
   description: 'Use the connected GitHub PAT through the GitHub REST API. GitHub enforces the token scopes and fine-grained repository permissions; never expose the token.',
@@ -633,13 +660,14 @@ const GITHUB_TOOL_POLICY = 'A GitHub plugin is connected. Use github_api for Git
 async function runOpenAIAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
   provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
-  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; forceImageGeneration: boolean;
+  chatId: string; allowNetwork: boolean; allowTerminal: boolean; allowImageTools: boolean; allowGitHubTools: boolean; allowMemory: boolean; forceImageGeneration: boolean;
   send: AgentSend;
 }): Promise<string> {
   const policies = [
     ...(options.allowTerminal ? [TERMINAL_TOOL_POLICY] : []),
     ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []),
     ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []),
+    ...(options.allowMemory ? [MEMORY_TOOL_POLICY] : []),
   ];
   const messages: any[] = [...(policies.length ? [{ role: 'system', content: policies.join('\n\n') }] : []), ...options.body.messages];
   let toolCount = 0;
@@ -660,6 +688,7 @@ async function runOpenAIAgent(options: {
           ...(options.allowTerminal ? [TERMINAL_TOOL] : []),
           ...(options.allowImageTools ? [IMAGE_TOOL] : []),
           ...(options.allowGitHubTools ? [GITHUB_TOOL] : []),
+          ...(options.allowMemory ? [MEMORY_TOOL, MEMORY_WRITE_TOOL] : []),
         ],
         tool_choice: round === 0 && options.forceImageGeneration
           ? { type: 'function', function: { name: 'create_image' } }
@@ -702,6 +731,10 @@ async function runOpenAIAgent(options: {
           else options.send('activity', { message: `Image tool failed: ${result.error || 'the provider returned no image.'}` });
         } else if (call.function?.name === 'github_api' && options.allowGitHubTools) {
           result = await executeGitHubTool(args, options.signal);
+        } else if (call.function?.name === 'memory_read' && options.allowMemory) {
+          result = await executeMemoryRead();
+        } else if (call.function?.name === 'memory_write' && options.allowMemory) {
+          result = await executeMemoryWrite(args);
         } else {
           throw new Error(`Unsupported or disabled tool requested: ${String(call.function?.name || 'unknown')}`);
         }
@@ -795,9 +828,10 @@ function escapeSvgText(value: string): string {
 async function runAnthropicAgent(options: {
   url: string; headers: Record<string, string>; body: AgentChatBody; signal: AbortSignal;
   provider: any; apiKey: string; referenceImages: string[]; imagePrompt: string;
-  chatId: string; allowNetwork: boolean; allowImageTools: boolean; allowGitHubTools: boolean; send: AgentSend;
+  chatId: string; allowNetwork: boolean; allowImageTools: boolean; allowGitHubTools: boolean; allowMemory: boolean; send: AgentSend;
 }): Promise<string> {
-  const system = [TERMINAL_TOOL_POLICY, ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []), ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
+  const system = [TERMINAL_TOOL_POLICY, ...(options.allowImageTools ? [IMAGE_TOOL_POLICY] : []), ...(options.allowGitHubTools ? [GITHUB_TOOL_POLICY] : []),
+    ...(options.allowMemory ? [MEMORY_TOOL_POLICY] : []), ...options.body.messages.filter(message => message.role === 'system').map(message => message.content)].join('\n\n');
   const messages: any[] = options.body.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toAnthropicContent(message.content) }));
   let toolCount = 0;
   for (let round = 0; round < 10; round++) {
@@ -807,7 +841,7 @@ async function runAnthropicAgent(options: {
       system,
       max_tokens: options.body.maxTokens || 4096,
       temperature: options.body.temperature,
-      tools: [ANTHROPIC_TERMINAL_TOOL, ...(options.allowImageTools ? [ANTHROPIC_IMAGE_TOOL] : []), ...(options.allowGitHubTools ? [ANTHROPIC_GITHUB_TOOL] : [])],
+      tools: [ANTHROPIC_TERMINAL_TOOL, ...(options.allowImageTools ? [ANTHROPIC_IMAGE_TOOL] : []), ...(options.allowGitHubTools ? [ANTHROPIC_GITHUB_TOOL] : []), ...(options.allowMemory ? [ANTHROPIC_MEMORY_READ_TOOL, ANTHROPIC_MEMORY_WRITE_TOOL] : [])],
       stream: false,
     }, options.signal, delta => options.send('chunk', { delta }));
     const blocks = Array.isArray(response?.content) ? response.content : [];
@@ -823,6 +857,10 @@ async function runAnthropicAgent(options: {
           if (result.output) options.send('media', result.output);
         } else if (call.name === 'github_api' && options.allowGitHubTools) {
           result = await executeGitHubTool(call.input, options.signal);
+        } else if (call.name === 'memory_read' && options.allowMemory) {
+          result = await executeMemoryRead();
+        } else if (call.name === 'memory_write' && options.allowMemory) {
+          result = await executeMemoryWrite(call.input);
         } else {
           if (call.name !== 'terminal_run') throw new Error(`Unsupported tool requested: ${String(call.name || 'unknown')}`);
           if (toolCount >= 8) throw new Error('This chat turn reached the safe limit of 8 terminal commands.');
